@@ -2,10 +2,10 @@
 
 [README in Russian](README.ru.md)
 
-**Fortochka** (форточка — the little window you open when the main window is boarded shut) is the
-[Telegram Web K](https://github.com/morethanwords/tweb) client — the good-looking web Telegram —
-packaged as a native desktop app that keeps working on censored networks. No browser, no Telegram
-Desktop, no VPN required.
+Fortochka is a desktop wrapper around [Telegram Web K](https://github.com/morethanwords/tweb)
+that works on networks where Telegram's web endpoints are blocked. The name comes from
+"форточка" (casement window): direct access is boarded shut by the provider, traffic goes
+through the small open window — Cloudflare fronts.
 
 ```
 ┌─ Electron ────────────────────────────────────────────────────────┐
@@ -27,59 +27,62 @@ Sidecar: bundled tg-ws-proxy-rs (vendored per-platform:
   └─ SOCKS5 :1080 — Telegram-only, used for the smoke test
 ```
 
-## Why it works where the browser doesn't
+## Why it works on blocked networks
 
-On censored networks (TCP drops to `*.web.telegram.org`), Fortochka:
+Direct TCP to `*.web.telegram.org` is dropped. Fortochka:
 
-1. **Connects through community Cloudflare fronts** — `kws{dcId}.<front>` domains that proxy
-   to Telegram's web endpoints. The front list is **live**: fetched from this repository
-   (`fronts.json`), so a new front reaches every user without an app release. A PR is all it takes.
-2. **Health-checks every front** (real WebSocket upgrade to `/apiws`, same as the client does),
-   ranks by latency, and hands the web app the ranked list at each transport rotation.
-3. **Resolves DNS over HTTPS** — provider resolvers commonly poison Telegram and front domains;
-   the shim resolves them itself and falls back to the system resolver.
-4. **Only ever talks to Telegram**: the CONNECT shim enforces an allowlist
-   (`*.telegram.org`, fronts, captcha providers used at login), so a compromised renderer
-   cannot exfiltrate data to arbitrary hosts. Local statics are served with a strict CSP.
+1. Connects through community Cloudflare fronts — `kws{dcId}.<front>` domains that proxy
+   to Telegram's web endpoints. The front list is fetched from this repository
+   (`fronts.json`): adding a front is a PR, not an app release.
+2. Health-checks every front with a real WebSocket upgrade to `/apiws` (what the client
+   itself does), ranks by latency, and hands the ranked list to the web app on every
+   transport rotation.
+3. Resolves DNS over HTTPS: provider resolvers commonly poison Telegram and front domains.
+   Falls back to the system resolver.
+4. Talks only to Telegram. The CONNECT shim allows only `*.telegram.org`, the fronts and
+   captcha providers used at login; local statics are served with a strict CSP. A
+   compromised renderer cannot exfiltrate data to arbitrary hosts.
 
-Subprotocol gotcha: the `/apiws` endpoint **requires the `binary` WebSocket subprotocol** —
-without it Telegram answers 404.
+Gotcha: `/apiws` requires the `binary` WebSocket subprotocol — without it Telegram
+answers 404.
 
 ## Install
 
 ### Windows
 
-Grab the latest installer from
-[Releases](../../releases): `fortochka-setup-<version>.exe` (installs to Program Files)
-or `fortochka-portable-<version>.exe` (single file, no install). Updates are automatic
-(installer build); the portable build tells you when a new release exists.
+From [Releases](../../releases):
+
+- `fortochka-setup-<version>.exe` — installer (Program Files), auto-updates
+- `fortochka-portable-<version>.exe` — single file, no installation
 
 ### macOS
 
-Download `fortochka-mac-<version>.dmg` from [Releases](../../releases) — a universal
-build (Intel + Apple Silicon) — open it and drag **Fortochka** to **Applications**.
+From [Releases](../../releases): `fortochka-mac-<version>.dmg` (universal: Intel and
+Apple Silicon). Open the DMG, drag Fortochka to Applications.
 
-There is no Apple Developer certificate ($99/yr), so Gatekeeper will stop the first
-launch. Clear the quarantine flag once in Terminal:
+The app has no Apple Developer signature, so macOS blocks the first launch. One-time
+fix, no Terminal:
 
-```
-xattr -cr /Applications/Fortochka.app
-```
+1. Launch the app. macOS shows a warning — click **Done**.
+2. Open System Settings → Privacy & Security, scroll to the Fortochka entry, click
+   **Open Anyway** → **Open**.
 
-(or right-click the app → **Open** → **Open**). After that it launches like any other
-app. On macOS the app is native where it counts: hidden-inset traffic lights, unread
-badge on the dock icon, standard `tg://` links, Cmd+C/V/Q — but it does not auto-update
-yet, so check [Releases](../../releases) from time to time.
+On macOS 13 and older: right-click the app → **Open** → **Open**.
+Terminal equivalent: `xattr -cr /Applications/Fortochka.app`.
 
-Tray (menubar) icon: open, diagnostics, autostart, quit. Closing the window hides it;
-click the dock icon to bring it back. Clicking a `tg://` link anywhere opens it in
-Fortochka.
+macOS builds do not auto-update: the app reports a new version (tray → check for
+updates), the DMG you download yourself.
+
+On both platforms: closing the window hides it; the tray/menubar icon has open,
+diagnostics, autostart, quit. Clicking a `tg://` link anywhere opens it in Fortochka.
+On macOS there is also an unread badge on the dock icon and standard shortcuts
+(Cmd+C/V/Q).
 
 ## Diagnostics
 
-Tray menu → **Diagnostics** opens a local page (`http://127.0.0.1:1081/fortochka/diag`) with
-live front health (latency per front, source of the list), app state, and buttons:
-re-probe fronts, check for updates, open engine log / profile folder.
+Tray menu → **Diagnostics** opens a local page (`http://127.0.0.1:1081/fortochka/diag`)
+with front health (latency per front, list source), app state, and buttons: re-probe
+fronts, check for updates, open engine log / profile folder.
 
 ```
 npm run smoke    # headless check: statics + service worker + fronts endpoint + wss + SOCKS bridge
@@ -87,8 +90,9 @@ npm run smoke    # headless check: statics + service worker + fronts endpoint + 
 
 ## Configuration
 
-Profile lives in `%APPDATA%/fortochka/` (migrated from the pre-release `tgweb-desktop`
-automatically). `config.json` is created with defaults on first run:
+Profile lives in `%APPDATA%/fortochka/` on Windows, `~/Library/Application Support/fortochka/`
+on macOS (migrated from the pre-release `tgweb-desktop` automatically). `config.json`
+is created with defaults on first run:
 
 ```jsonc
 {
@@ -104,7 +108,8 @@ automatically). `config.json` is created with defaults on first run:
 }
 ```
 
-`state.json` (app-managed) keeps window bounds; `fronts-cache.json` is the last good front list.
+`state.json` (app-managed) keeps window bounds; `fronts-cache.json` is the last good
+front list.
 
 ## Rebuilding webk (optional)
 
@@ -128,33 +133,34 @@ npm run dist:signed     # + WIN_CSC_KEY_PASSWORD=<pfx password> env var
 npm run dist:mac        # on macOS (or CI): release/fortochka-mac-<version>.{zip,dmg}
 ```
 
+`dist:signed` expects a code-signing PFX at `build/codesign.pfx` (never committed). Create
+a self-signed one with `New-SelfSignedCertificate` (CodeSigning), export to PFX, import
+the .cer into trusted roots on your machine to see the publisher in UAC. SmartScreen
+reputation is separate — it accumulates with downloads.
+
 The macOS build is produced by [.github/workflows/mac.yml](.github/workflows/mac.yml)
 (manual dispatch on a GitHub macOS runner): it builds the universal zip + dmg, runs the
-smoke test right on the runner and uploads the artifacts to the release. Signing is
-ad-hoc (`identity: null`) — see the Gatekeeper note above.
-
-`dist:signed` expects a code-signing PFX at `build/codesign.pfx` (never committed). Create a
-self-signed one with `New-SelfSignedCertificate` (CodeSigning, CN of your choice), export to
-PFX, import the .cer into trusted roots on your machine to see the publisher in UAC.
-SmartScreen reputation is a separate thing — it accumulates with downloads.
+smoke test on the runner and uploads the artifacts to the release. Signing is ad-hoc
+(`identity: null`) — see the macOS install note above.
 
 ## Threat model
 
-**What a front (the community domain operator + Cloudflare) can see:** that your IP talks to
-Cloudflare and the SNI of the front domain; the fact, timing and size of WebSocket traffic to
-`/apiws`; the DC id from the MTProto obfuscation handshake header.
+**What a front (the community domain operator + Cloudflare) can see:** that your IP talks
+to Cloudflare and the SNI of the front domain; the fact, timing and size of WebSocket
+traffic to `/apiws`; the DC id from the MTProto obfuscation handshake header.
 
-**What it cannot see:** message content — the WebSocket payload is MTProto, cryptographically
-end-to-end between the client and Telegram. The front relays ciphertext and can break your
-connection, but not read or meaningfully alter it.
+**What it cannot see:** message content — the WebSocket payload is MTProto,
+cryptographically end-to-end between the client and Telegram. The front relays ciphertext
+and can break your connection, but not read or meaningfully alter it.
 
 **What Fortochka itself does:** everything runs locally; the local shim only allows
-Telegram-related hosts; no telemetry, no analytics, nothing phoning home except the front-list
-update (`fronts.json` from this repo) and update checks (GitHub Releases).
+Telegram-related hosts; no telemetry, no analytics, nothing phoning home except the
+front-list update (`fronts.json` from this repo) and update checks (GitHub Releases).
 
-**Remaining trust:** front domains are community-run and can disappear or degrade — that is a
-liveness risk, not a privacy risk. The health-check routes around dead fronts automatically.
-Running a front yourself (`workerDomains` in config) removes third parties entirely.
+**Remaining trust:** front domains are community-run and can disappear or degrade — that
+is a liveness risk, not a privacy risk. The health-check routes around dead fronts
+automatically. Running a front yourself (`workerDomains` in config) removes third
+parties entirely.
 
 ## Licenses
 
