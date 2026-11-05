@@ -1,169 +1,169 @@
 # Fortochka
 
-[README in Russian](README.ru.md)
+[README in English](README.en.md)
 
-Fortochka is a desktop wrapper around [Telegram Web K](https://github.com/morethanwords/tweb)
-that works on networks where Telegram's web endpoints are blocked. The name comes from
-"форточка" (casement window): direct access is boarded shut by the provider, traffic goes
-through the small open window — Cloudflare fronts.
+Fortochka — настольная обёртка [Telegram Web K](https://github.com/morethanwords/tweb),
+работающая в сетях, где веб-эндпоинты Telegram заблокированы. Название — от «форточки»:
+прямой доступ заколочен провайдером, трафик идёт через маленькое открытое окно —
+CF-фронты.
 
 ```
 ┌─ Electron ────────────────────────────────────────────────────────┐
-│  UI:   webk statics served on http://127.0.0.1:1081               │
-│        (localhost = secure context → service worker works)        │
-│  Net:  Chromium session proxy → local HTTP CONNECT shim           │
-│        allowlist (Telegram hosts only) + DNS-over-HTTPS           │
+│  UI:   статика webk на http://127.0.0.1:1081                      │
+│        (localhost = secure context → service worker работает)     │
+│  Сеть: session proxy Chromium → локальный HTTP CONNECT-шимм       │
+│        allowlist (только Telegram-хосты) + DNS-over-HTTPS         │
 └────────────────────────┬──────────────────────────────────────────┘
                          ▼
-   wss://kws{dcId}.<front>/apiws  (live front list + health-check)
+   wss://kws{dcId}.<фронт>/apiws  (живой список + health-check)
                          ▼
-      Cloudflare edge ──► Telegram web endpoint (TLS end-to-end)
+      Cloudflare ──► веб-эндпоинт Telegram (TLS end-to-end)
                          ▼
-              Telegram DC (MTProto content e2e)
+              Telegram DC (контент MTProto e2e)
 
-Sidecar: bundled tg-ws-proxy-rs (vendored per-platform:
+Отдельно: вшитый tg-ws-proxy-rs (по платформам:
   vendor/tg-ws-proxy.exe / vendor/tg-ws-proxy-macos)
-  ├─ MTProto :1443 — point regular Telegram Desktop at it too
-  └─ SOCKS5 :1080 — Telegram-only, used for the smoke test
+  ├─ MTProto :1443 — можно подключить и обычный Telegram Desktop
+  └─ SOCKS5 :1080 — только Telegram, используется в smoke-тесте
 ```
 
-## Why it works on blocked networks
+## Почему работает на заблокированных сетях
 
-Direct TCP to `*.web.telegram.org` is dropped. Fortochka:
+Прямой TCP до `*.web.telegram.org` режется. Fortochka:
 
-1. Connects through community Cloudflare fronts — `kws{dcId}.<front>` domains that proxy
-   to Telegram's web endpoints. The front list is fetched from this repository
-   (`fronts.json`): adding a front is a PR, not an app release.
-2. Health-checks every front with a real WebSocket upgrade to `/apiws` (what the client
-   itself does), ranks by latency, and hands the ranked list to the web app on every
-   transport rotation.
-3. Resolves DNS over HTTPS: provider resolvers commonly poison Telegram and front domains.
-   Falls back to the system resolver.
-4. Talks only to Telegram. The CONNECT shim allows only `*.telegram.org`, the fronts and
-   captcha providers used at login; local statics are served with a strict CSP. A
-   compromised renderer cannot exfiltrate data to arbitrary hosts.
+1. Ходит через CF-фонты сообщества — домены `kws{dcId}.<фронт>`, проксирующие на
+   веб-эндпоинты Telegram. Список тянется из этого репозитория (`fronts.json`): добавить
+   фронт — это PR, а не релиз приложения.
+2. Проверяет каждый фронт реальным WS-upgrade до `/apiws` (как делает сам клиент),
+   сортирует по латентности и отдаёт webk свежий порядок при каждой ротации транспортов.
+3. Резолвит DNS через DNS-over-HTTPS: резолверы провайдеров часто травят и
+   Telegram-домены, и фронты. При неудаче — системный DNS.
+4. Ходит только в Telegram. CONNECT-шимм пускает хосты по allowlist (`*.telegram.org`,
+   фронты, капча при логине), локальная статика отдаётся со строгим CSP.
+   Скомпрометированный рендерер не может слить данные мимо Telegram.
 
-Gotcha: `/apiws` requires the `binary` WebSocket subprotocol — without it Telegram
-answers 404.
+Нюанс: `/apiws` требует WebSocket subprotocol `binary` — без него Telegram отвечает 404.
 
-## Install
+## Установка
 
 ### Windows
 
-From [Releases](../../releases):
+Из [Releases](../../releases):
 
-- `fortochka-setup-<version>.exe` — installer (Program Files), auto-updates
-- `fortochka-portable-<version>.exe` — single file, no installation
+- `fortochka-setup-<версия>.exe` — установщик (Program Files), обновляется сам
+- `fortochka-portable-<версия>.exe` — один файл, без установки
 
 ### macOS
 
-From [Releases](../../releases): `fortochka-mac-<version>.dmg` (universal: Intel and
-Apple Silicon). Open the DMG, drag Fortochka to Applications.
+Из [Releases](../../releases): `fortochka-mac-<версия>.dmg` (universal: Intel и
+Apple Silicon). Откройте DMG, перетащите Fortochka в Applications.
 
-The app has no Apple Developer signature, so macOS blocks the first launch. One-time
-fix, no Terminal:
+Приложение не подписано сертификатом Apple, поэтому macOS заблокирует первый запуск.
+Одноразовое решение без Терминала:
 
-1. Launch the app. macOS shows a warning — click **Done**.
-2. Open System Settings → Privacy & Security, scroll to the Fortochka entry, click
-   **Open Anyway** → **Open**.
+1. Запустите приложение. Появится предупреждение macOS — нажмите **Готово**.
+2. Откройте Системные настройки → Конфиденциальность и безопасность, прокрутите до
+   записи про Fortochka, нажмите **«Открыть в любом случае»** → **Открыть**.
 
-On macOS 13 and older: right-click the app → **Open** → **Open**.
-Terminal equivalent: `xattr -cr /Applications/Fortochka.app`.
+На macOS 13 и старше то же самое: правый клик по приложению → **Открыть** → **Открыть**.
+Из Терминала то же самое: `xattr -cr /Applications/Fortochka.app`.
 
-macOS builds do not auto-update: the app reports a new version (tray → check for
-updates), the DMG you download yourself.
+Пошаговый гайд со всеми вариантами и версиями macOS:
+[docs/install-macos.md](docs/install-macos.md).
 
-On both platforms: closing the window hides it; the tray/menubar icon has open,
-diagnostics, autostart, quit. Clicking a `tg://` link anywhere opens it in Fortochka.
-On macOS there is also an unread badge on the dock icon and standard shortcuts
-(Cmd+C/V/Q).
+На macOS автообновления нет: приложение сообщит о новой версии (трей → проверить
+обновления), DMG скачивается вручную.
 
-## Diagnostics
+На обеих платформах: закрытие окна прячет его; в меню иконки трея — открыть,
+диагностика, автозапуск, выход. Ссылка `tg://`, открытая где угодно, открывается в
+Fortochka. На macOS дополнительно: бейдж непрочитанных на иконке в доке и обычные
+сокращения (Cmd+C/V/Q).
 
-Tray menu → **Diagnostics** opens a local page (`http://127.0.0.1:1081/fortochka/diag`)
-with front health (latency per front, list source), app state, and buttons: re-probe
-fronts, check for updates, open engine log / profile folder.
+## Диагностика
+
+Трей → **Диагностика**: локальная страница (`http://127.0.0.1:1081/fortochka/diag`) с
+состоянием фронтов (латентность, источник списка), состоянием приложения и кнопками:
+перепроверить фронты, проверить обновления, открыть лог движка / папку профиля.
 
 ```
-npm run smoke    # headless check: statics + service worker + fronts endpoint + wss + SOCKS bridge
+npm run smoke    # безголовая проверка: статика + service worker + fronts + wss + SOCKS-бридж
 ```
 
-## Configuration
+## Настройки
 
-Profile lives in `%APPDATA%/fortochka/` on Windows, `~/Library/Application Support/fortochka/`
-on macOS (migrated from the pre-release `tgweb-desktop` automatically). `config.json`
-is created with defaults on first run:
+Профиль — `%APPDATA%/fortochka/` на Windows, `~/Library/Application Support/fortochka/`
+на macOS (старый `tgweb-desktop` мигрирует автоматически). `config.json` создаётся при
+первом запуске:
 
 ```jsonc
 {
   "ports": { "web": 1081, "socks": 1080, "mtproto": 1443 },
   "fronts": {
-    "autoUpdate": true,     // pull fronts.json from this repo every 3h
-    "list": null            // array of domains — hard override of the list
+    "autoUpdate": true,     // тянуть fronts.json из репо раз в 3 часа
+    "list": null            // массив доменов — жёсткое перекрытие списка
   },
-  "workerDomains": [],      // your own Cloudflare Worker domain(s), passed to the engine
+  "workerDomains": [],      // свой Cloudflare Worker, передаётся движку
   "doh": { "enabled": true, "urls": null },
-  "security": { "allowHosts": [] },  // extra CONNECT hosts, if you know why
+  "security": { "allowHosts": [] },  // дополнительные хосты для CONNECT
   "window": { "startMinimized": false, "rememberBounds": true }
 }
 ```
 
-`state.json` (app-managed) keeps window bounds; `fronts-cache.json` is the last good
-front list.
+`state.json` (управляет приложение) хранит размер/позицию окна; `fronts-cache.json` —
+последний рабочий список фронтов.
 
-## Rebuilding webk (optional)
+## Пересборка webk (опционально)
 
-`webapp/` ships prebuilt and patched. To rebuild from upstream sources:
+В `webapp/` лежит готовая пропатченная сборка. Из исходников:
 
 ```
 git clone --depth 1 https://github.com/morethanwords/tweb.git
 cd tweb && pnpm install --frozen-lockfile
-# patch src/lib/mtproto/dcConfigurator.ts (front domain rotation, see git history)
-pnpm exec vite build          # outputs to dist/, NOT public/!
-# copy dist/* into webapp/, then public/assets/* into webapp/assets/
-node tools/patch-worker-fronts.js   # re-apply the live-front-list patch to worker bundles
+# патч src/lib/mtproto/dcConfigurator.ts (ротация доменов фронтов)
+pnpm exec vite build          # пишет в dist/, НЕ в public/!
+# скопировать dist/* в webapp/, затем public/assets/* в webapp/assets/
+node tools/patch-worker-fronts.js   # пере-применить патч живого списка в воркерах
 ```
 
-## Building the installers
+## Сборка установщиков
 
 ```
 npm install
-npm run dist            # unsigned: release/fortochka-{setup,portable}-<version>.exe
-npm run dist:signed     # + WIN_CSC_KEY_PASSWORD=<pfx password> env var
-npm run dist:mac        # on macOS (or CI): release/fortochka-mac-<version>.{zip,dmg}
+npm run dist            # без подписи: release/fortochka-{setup,portable}-<версия>.exe
+npm run dist:signed     # + переменная окружения WIN_CSC_KEY_PASSWORD=<пароль pfx>
+npm run dist:mac        # на macOS (или в CI): release/fortochka-mac-<версия>.{zip,dmg}
 ```
 
-`dist:signed` expects a code-signing PFX at `build/codesign.pfx` (never committed). Create
-a self-signed one with `New-SelfSignedCertificate` (CodeSigning), export to PFX, import
-the .cer into trusted roots on your machine to see the publisher in UAC. SmartScreen
-reputation is separate — it accumulates with downloads.
+`dist:signed` ждёт PFX в `build/codesign.pfx` (в git не попадает). Создайте
+самоподписанный серт (`New-SelfSignedCertificate`, CodeSigning), экспортируйте в PFX,
+.cer импортируйте в доверенные корни — тогда UAC покажет издателя. Репутация SmartScreen
+отдельная история — набирается скачиваниями.
 
-The macOS build is produced by [.github/workflows/mac.yml](.github/workflows/mac.yml)
-(manual dispatch on a GitHub macOS runner): it builds the universal zip + dmg, runs the
-smoke test on the runner and uploads the artifacts to the release. Signing is ad-hoc
-(`identity: null`) — see the macOS install note above.
+macOS-сборку делает [.github/workflows/mac.yml](.github/workflows/mac.yml) (ручной запуск
+на GitHub macos-раннере): собирает universal zip + dmg, прогоняет smoke-тест на раннере и
+кладёт артефакты в релиз. Подпись ad-hoc (`identity: null`) — см. заметку про установку
+на macOS выше.
 
-## Threat model
+## Модель угроз
 
-**What a front (the community domain operator + Cloudflare) can see:** that your IP talks
-to Cloudflare and the SNI of the front domain; the fact, timing and size of WebSocket
-traffic to `/apiws`; the DC id from the MTProto obfuscation handshake header.
+**Что видит фронт (оператор домена + Cloudflare):** что ваш IP ходит в Cloudflare с SNI
+фронтового домена; факт, время и объём WebSocket-трафика к `/apiws`; номер DC из
+заголовка обфускации MTProto.
 
-**What it cannot see:** message content — the WebSocket payload is MTProto,
-cryptographically end-to-end between the client and Telegram. The front relays ciphertext
-and can break your connection, but not read or meaningfully alter it.
+**Чего не видит:** содержимое сообщений — полезная нагрузка WebSocket зашифрована MTProto
+end-to-end между клиентом и Telegram. Фронт пересылает шифротекст и может порвать
+соединение, но не прочитать и не содержательно подменить его.
 
-**What Fortochka itself does:** everything runs locally; the local shim only allows
-Telegram-related hosts; no telemetry, no analytics, nothing phoning home except the
-front-list update (`fronts.json` from this repo) and update checks (GitHub Releases).
+**Что делает сам Fortochka:** всё локально; шимм пускает только Telegram-хосты; никакой
+телеметрии — наружу ходит только обновление списка фронтов (`fronts.json` из этого репо)
+и проверка обновлений (GitHub Releases).
 
-**Remaining trust:** front domains are community-run and can disappear or degrade — that
-is a liveness risk, not a privacy risk. The health-check routes around dead fronts
-automatically. Running a front yourself (`workerDomains` in config) removes third
-parties entirely.
+**Остаточное доверие:** фронтовые домены — комьюнити, они могут умирать и деградировать;
+это риск живости, а не приватности. Health-check автоматически обходит мёртвые. Свой
+фронт (`workerDomains` в конфиге) убирает третью сторону полностью.
 
-## Licenses
+## Лицензии
 
 - tweb (Telegram Web K): GPL-3.0 — https://github.com/morethanwords/tweb
 - tg-ws-proxy-rs: MIT — https://github.com/valnesfjord/tg-ws-proxy-rs
-- This wrapper: GPL-3.0-or-later (see [LICENSE](LICENSE))
+- Эта обёртка: GPL-3.0-or-later ([LICENSE](LICENSE))
