@@ -16,7 +16,8 @@
     "smoke": "electron . --smoke",
     "patch-webapp": "node tools/patch-worker-fronts.js",
     "dist": "electron-builder --win nsis portable",
-    "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx"
+    "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx",
+    "dist:mac": "electron-builder --mac zip dmg"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"
@@ -35,6 +36,7 @@
       "package.json",
       "webapp/**/*",
       "vendor/*.exe",
+      "vendor/tg-ws-proxy-macos",
       "!webapp/**/*.map"
     ],
     "asar": false,
@@ -48,6 +50,31 @@
       "provider": "github",
       "owner": "doctorBax",
       "repo": "fortochka"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": ["universal"]
+        },
+        {
+          "target": "dmg",
+          "arch": ["universal"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.social-networking",
+      "identity": null,
+      "artifactName": "fortochka-mac-${version}.${ext}"
+    },
+    "dmg": {
+      "title": "Fortochka ${version}",
+      "background": "build/dmg-background.png",
+      "window": { "width": 660, "height": 400 },
+      "contents": [
+        { "x": 180, "y": 200, "type": "file" },
+        { "x": 480, "y": 200, "type": "link", "path": "/Applications" }
+      ]
     },
     "win": {
       "target": [

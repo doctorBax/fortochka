@@ -33,12 +33,17 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const APP_DIR = __dirname;
 const WEBAPP_DIR = path.join(APP_DIR, 'webapp');
-const TGWS_EXE = path.join(APP_DIR, 'vendor', 'tg-ws-proxy.exe');
+const IS_MAC = process.platform === 'darwin';
+// движок вендорится по платформам: win — tg-ws-proxy.exe, mac — universal-бинарь
+const TGWS_EXE = path.join(APP_DIR, 'vendor', IS_MAC ? 'tg-ws-proxy-macos' : 'tg-ws-proxy.exe');
 
 // ---------- профиль: миграция старого, фиксация пути, один экземпляр ----------
 // Профиль общий и в dev, и в установленном виде — сессия переживает переезд.
 // Папка переименована при выходе 0.2.0: tgweb-desktop -> fortocha (rename целиком).
-const USER_DATA = netcore.migrateProfile(app.getPath('appData'));
+// FORTOCHKA_USER_DATA — отдельный профиль для тестов (смоук параллельно
+// с работающим приложением: свой лок и свои порты в config.json).
+const USER_DATA = process.env.FORTOCHKA_USER_DATA
+  || netcore.migrateProfile(app.getPath('appData'));
 app.setPath('userData', USER_DATA);
 
 // Один экземпляр: повторный клик по ярлыку не поднимает вторую копию
@@ -91,7 +96,11 @@ let quitting = false;
 function startTgws() {
   if (quitting || !fs.existsSync(TGWS_EXE)) return;
   const fd = openTgwsLog();
-  const args = ['--host', '127.0.0.1', '--socks-enabled', '--socks-port', String(SOCKS_PORT), '--default-domains'];
+  // MTProto-порт тоже конфигурируется: два экземпляра на одной машине
+  // (например смоук рядом с работающим приложением) не должны драться за 1443
+  const mtprotoPort = (config.ports && config.ports.mtproto) || 1443;
+  const args = ['--host', '127.0.0.1', '--port', String(mtprotoPort),
+    '--socks-enabled', '--socks-port', String(SOCKS_PORT), '--default-domains'];
   if (Array.isArray(config.workerDomains) && config.workerDomains.length) {
     for (const d of config.workerDomains) args.push('--cf-worker-domain', d); // свой CF Worker
   }
@@ -248,6 +257,9 @@ function updaterStatusText() {
   return updateStatusText || 'проверяется...';
 }
 
+// подсказка «что делать с найденным обновлением» — зависит от платформы
+const updateHint = () => IS_MAC ? ' — скачайте новый DMG с GitHub.' : ' — скачается и установится при выходе.';
+
 async function handleFortochka(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -281,7 +293,7 @@ async function handleFortochka(req, res) {
           const r = await autoUpdater.checkForUpdates();
           const v = r && r.updateInfo && r.updateInfo.version;
           updateStatusText = v && v !== app.getVersion() ? 'доступно ' + v + ' — скачается само' : 'актуальная версия';
-          sendJson(res, 200, { message: v && v !== app.getVersion() ? 'Доступна версия ' + v + ' — скачается и установится при выходе.' : 'У вас актуальная версия (' + app.getVersion() + ').', latest: v });
+          sendJson(res, 200, { message: v && v !== app.getVersion() ? 'Доступна версия ' + v + updateHint() : 'У вас актуальная версия (' + app.getVersion() + ').', latest: v });
         } catch (e) {
           updateStatusText = 'ошибка проверки';
           sendJson(res, 200, { message: 'Не удалось проверить: ' + (e.message || e) });
@@ -373,6 +385,11 @@ function parseUnreadFromTitle(title) {
 function applyBadge(countStr) {
   const n = parseInt(countStr, 10) || 0;
   unread = n;
+  // macOS: нативный бейдж на иконке в доке (setOverlayIcon — только Windows)
+  if (IS_MAC) {
+    if (app.dock) app.dock.setBadge(n ? String(n) : '');
+    return;
+  }
   if (!n) {
     if (win) win.setOverlayIcon(null, '');
     if (tray) tray.setImage(trayIcon());
@@ -427,6 +444,8 @@ function createWindow() {
     backgroundColor: '#212121',
     autoHideMenuBar: true,
     show: !IS_SMOKE && !(IS_HIDDEN || config.window.startMinimized),
+    // mac: нативные traffic lights в шапке webk (см. CSS-инъекцию ниже)
+    ...(IS_MAC ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 17 } } : {}),
     icon: trayIcon(),
     webPreferences: {
       contextIsolation: true,
@@ -470,6 +489,16 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     trace('did-finish-load');
+    if (IS_MAC) {
+      // traffic lights живут поверх шапки webk: сдвигаем её контент правее,
+      // а саму шапку делаем областью перетаскивания окна (кнопки/поиск — нет)
+      win.webContents.insertCSS(`
+        .sidebar-header { padding-left: 76px !important; -webkit-app-region: drag; }
+        .sidebar-header button, .sidebar-header input, .sidebar-header a,
+        .sidebar-header .btn-menu, .sidebar-header .btn-icon,
+        .sidebar-header [class*="search"] { -webkit-app-region: no-drag; }
+      `).catch(() => {});
+    }
     if (pendingTgLink) {
       const url = pendingTgLink; pendingTgLink = null;
       handleTgLink(url);
@@ -485,6 +514,28 @@ function createWindow() {
   });
 
   win.loadURL(`http://127.0.0.1:${WEB_PORT}/`);
+}
+
+// mac: настоящее меню-бар (Cmd+C/V/X работают в webk через роли editMenu,
+// Cmd+Q — выход). На Windows ничего не меняем — там меню автоскрытое.
+function setupMacMenu() {
+  if (!IS_MAC || IS_SMOKE) return;
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: app.name, submenu: [
+      { role: 'about' },
+      { type: 'separator' },
+      { role: 'services' },
+      { type: 'separator' },
+      { role: 'hide', label: 'Скрыть Fortochka' },
+      { role: 'hideOthers', label: 'Скрыть остальные' },
+      { role: 'unhide', label: 'Показать все' },
+      { type: 'separator' },
+      { label: 'Завершить Fortochka', accelerator: 'Command+Q',
+        click: () => { quitting = true; app.quit(); } }
+    ]},
+    { role: 'editMenu' },
+    { role: 'windowMenu' }
+  ]));
 }
 
 function createTray() {
@@ -544,7 +595,8 @@ function setupUpdater() {
   autoUpdater = au;
   // самоподписанный серт: стандартная проверка подписи обновления не пройдёт
   autoUpdater.verifyUpdateCodeSignature = async () => null;
-  autoUpdater.autoDownload = true;
+  // mac: подпись ad-hoc — автоматическую замену .app не включаем, только сообщаем
+  autoUpdater.autoDownload = !IS_MAC;
   autoUpdater.on('update-downloaded', (info) => {
     updateStatusText = 'скачано ' + info.version + ' — установится при выходе';
     if (Notification.isSupported()) {
@@ -569,7 +621,7 @@ function manualUpdateCheck() {
     if (v && v !== app.getVersion()) {
       updateStatusText = 'доступно ' + v;
       if (Notification.isSupported()) {
-        new Notification({ title: 'Fortochka', body: 'Доступна версия ' + v + ' — скачается и установится при выходе.' }).show();
+        new Notification({ title: 'Fortochka', body: 'Доступна версия ' + v + updateHint() }).show();
       }
     } else {
       updateStatusText = 'актуальная версия';
@@ -654,6 +706,9 @@ app.on('second-instance', (e, argv) => {
   if (url) handleTgLink(url);
 });
 
+// mac: клик по иконке в доке возвращает окно (окно закрыто -> спрятано в трей)
+app.on('activate', () => { if (!IS_SMOKE) showWindow(); });
+
 app.whenReady().then(() => {
   try {
     configureSession();
@@ -665,6 +720,7 @@ app.whenReady().then(() => {
     registerProtocol();
     createWindow();
     trace('window created');
+    setupMacMenu();
     createTray();
     setupUpdater();
     // холодный старт по tg://-ссылке: URL приходит аргументом командной строки

@@ -60,7 +60,7 @@ const DEFAULT_DOH = [
 ];
 
 const DEFAULT_CONFIG = {
-  ports: { web: 1081, socks: 1080 },
+  ports: { web: 1081, socks: 1080, mtproto: 1443 },
   fronts: {
     autoUpdate: true,        // подтягивать fronts.json из репо
     list: null               // массив доменов — ручное перекрытие списка

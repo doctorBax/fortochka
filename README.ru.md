@@ -23,7 +23,8 @@
                          ▼
               Telegram DC (контент MTProto e2e)
 
-Отдельно: вшитый tg-ws-proxy-rs (vendor/tg-ws-proxy.exe)
+Отдельно: вшитый tg-ws-proxy-rs (по платформам:
+  vendor/tg-ws-proxy.exe / vendor/tg-ws-proxy-macos)
   ├─ MTProto :1443 — можно подключить и обычный Telegram Desktop
   └─ SOCKS5 :1080 — только Telegram, используется в smoke-тесте
 ```
@@ -46,12 +47,31 @@
 
 ## Установка
 
+### Windows
+
 Скачайте последний релиз в [Releases](../../releases): `fortochka-setup-<версия>.exe`
 (установка в Program Files) или `fortochka-portable-<версия>.exe` (один файл, без установки).
 Обновления автоматические (установщик); portable сообщает о новых релизах.
 
-Меню трея: открыть, диагностика, автозапуск (стартует свёрнутым), выход. Закрытие окна
-сворачивает в трей. Клик по ссылке `tg://` где угодно в Windows открывает её в Fortochka.
+### macOS
+
+Скачайте `fortochka-mac-<версия>.dmg` из [Releases](../../releases) — универсальная сборка
+(Intel + Apple Silicon), откройте и перетащите **Fortochka** в **Applications**.
+
+Сертификата Apple Developer ($99/год) нет, поэтому Gatekeeper остановит первый запуск.
+Один раз снимите карантин в Терминале:
+
+```
+xattr -cr /Applications/Fortochka.app
+```
+
+(или правый клик по приложению → **Открыть** → **Открыть**). Дальше запускается как любое
+другое приложение. На маке всё нативно: traffic lights в шапке, бейдж непрочитанных на
+иконке в доке, ссылки `tg://`, Cmd+C/V/Q — но автообновления пока нет, поглядывайте на
+[Releases](../../releases).
+
+Меню трея: открыть, диагностика, автозапуск, выход. Закрытие окна прячет его; клик по
+иконке в доке возвращает. Клик по ссылке `tg://` где угодно открывает её в Fortochka.
 
 ## Диагностика
 
@@ -70,7 +90,7 @@ npm run smoke    # безголовая проверка: статика + servi
 
 ```jsonc
 {
-  "ports": { "web": 1081, "socks": 1080 },
+  "ports": { "web": 1081, "socks": 1080, "mtproto": 1443 },
   "fronts": {
     "autoUpdate": true,     // тянуть fronts.json из репо раз в 3 часа
     "list": null            // массив доменов — жёсткое перекрытие списка
@@ -104,7 +124,12 @@ node tools/patch-worker-fronts.js   # пере-применить патч жи�
 npm install
 npm run dist            # без подписи: release/fortochka-{setup,portable}-<версия>.exe
 npm run dist:signed     # + переменная окружения WIN_CSC_KEY_PASSWORD=<пароль pfx>
+npm run dist:mac        # на macOS (или в CI): release/fortochka-mac-<версия>.{zip,dmg}
 ```
+
+macOS-сборку делает [.github/workflows/mac.yml](.github/workflows/mac.yml) (ручной запуск
+на GitHub macos-раннере): собирает universal zip + dmg, прогоняет smoke-тест прямо там и
+кладёт артефакты в релиз. Подпись ad-hoc (`identity: null`) — см. заметку про Gatekeeper выше.
 
 `dist:signed` ждёт PFX в `build/codesign.pfx` (в git не попадает). Создайте самоподписанный
 серт (`New-SelfSignedCertificate`, CodeSigning), экспортируйте в PFX, .cer импортируйте в

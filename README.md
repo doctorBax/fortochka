@@ -21,7 +21,8 @@ Desktop, no VPN required.
                          ▼
               Telegram DC (MTProto content e2e)
 
-Sidecar: bundled tg-ws-proxy-rs (vendor/tg-ws-proxy.exe)
+Sidecar: bundled tg-ws-proxy-rs (vendored per-platform:
+  vendor/tg-ws-proxy.exe / vendor/tg-ws-proxy-macos)
   ├─ MTProto :1443 — point regular Telegram Desktop at it too
   └─ SOCKS5 :1080 — Telegram-only, used for the smoke test
 ```
@@ -46,13 +47,33 @@ without it Telegram answers 404.
 
 ## Install
 
+### Windows
+
 Grab the latest installer from
 [Releases](../../releases): `fortochka-setup-<version>.exe` (installs to Program Files)
 or `fortochka-portable-<version>.exe` (single file, no install). Updates are automatic
 (installer build); the portable build tells you when a new release exists.
 
-Tray icon: open, diagnostics, autostart (starts minimized), quit. Closing the window
-minimizes to tray. Clicking a `tg://` link anywhere opens it in Fortochka.
+### macOS
+
+Download `fortochka-mac-<version>.dmg` from [Releases](../../releases) — a universal
+build (Intel + Apple Silicon) — open it and drag **Fortochka** to **Applications**.
+
+There is no Apple Developer certificate ($99/yr), so Gatekeeper will stop the first
+launch. Clear the quarantine flag once in Terminal:
+
+```
+xattr -cr /Applications/Fortochka.app
+```
+
+(or right-click the app → **Open** → **Open**). After that it launches like any other
+app. On macOS the app is native where it counts: hidden-inset traffic lights, unread
+badge on the dock icon, standard `tg://` links, Cmd+C/V/Q — but it does not auto-update
+yet, so check [Releases](../../releases) from time to time.
+
+Tray (menubar) icon: open, diagnostics, autostart, quit. Closing the window hides it;
+click the dock icon to bring it back. Clicking a `tg://` link anywhere opens it in
+Fortochka.
 
 ## Diagnostics
 
@@ -71,7 +92,7 @@ automatically). `config.json` is created with defaults on first run:
 
 ```jsonc
 {
-  "ports": { "web": 1081, "socks": 1080 },
+  "ports": { "web": 1081, "socks": 1080, "mtproto": 1443 },
   "fronts": {
     "autoUpdate": true,     // pull fronts.json from this repo every 3h
     "list": null            // array of domains — hard override of the list
@@ -104,7 +125,13 @@ node tools/patch-worker-fronts.js   # re-apply the live-front-list patch to work
 npm install
 npm run dist            # unsigned: release/fortochka-{setup,portable}-<version>.exe
 npm run dist:signed     # + WIN_CSC_KEY_PASSWORD=<pfx password> env var
+npm run dist:mac        # on macOS (or CI): release/fortochka-mac-<version>.{zip,dmg}
 ```
+
+The macOS build is produced by [.github/workflows/mac.yml](.github/workflows/mac.yml)
+(manual dispatch on a GitHub macOS runner): it builds the universal zip + dmg, runs the
+smoke test right on the runner and uploads the artifacts to the release. Signing is
+ad-hoc (`identity: null`) — see the Gatekeeper note above.
 
 `dist:signed` expects a code-signing PFX at `build/codesign.pfx` (never committed). Create a
 self-signed one with `New-SelfSignedCertificate` (CodeSigning, CN of your choice), export to

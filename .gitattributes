@@ -1,0 +1,5 @@
+vendor/tg-ws-proxy.exe binary
+vendor/tg-ws-proxy-macos binary
+build/icon.ico binary
+build/icon.png binary
+build/dmg-background.png binary

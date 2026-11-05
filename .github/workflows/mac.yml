@@ -1,0 +1,46 @@
+name: mac-build
+
+# Сборка macOS-релиза Fortochka: universal zip + dmg, ad-hoc подпись (без
+# Apple Developer), смоук-тест прямо на раннере, артефакты — в существующий
+# релиз. Запуск вручную: Actions → mac-build → Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (zip + dmg, universal)
+        run: npm run dist:mac
+        env:
+          # нет Apple-сертификата — electron-builder подписывает ad-hoc,
+          # Gatekeeper обходится xattr (см. README)
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Smoke test on the runner
+        run: npm run smoke
+
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la release/
+          gh release upload v0.2.0 \
+            release/fortochka-mac-*.zip \
+            release/fortochka-mac-*.dmg \
+            release/latest-mac.yml \
+            --clobber
+          gh release view v0.2.0
