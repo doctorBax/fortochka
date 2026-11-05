@@ -38,10 +38,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ls -la release/
-          gh release upload v0.2.0 \
+          VER="v$(node -p "require('./package.json').version")"
+          # релиза может не быть — создаём; если есть, просто льём в него
+          gh release create "$VER" --title "$VER" --generate-notes 2>/dev/null || true
+          gh release upload "$VER" \
             release/fortochka-mac-*.zip \
             release/fortochka-mac-*.dmg \
             release/latest-mac.yml \
             --clobber
-          gh release view v0.2.0
+          gh release view "$VER"
