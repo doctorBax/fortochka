@@ -1,0 +1,3 @@
+//# allFunctionsCalledOnLoad
+import{_ as e,h as t,m as n,p as r}from"./commonStateStorage-1CyY1XFl.js";function i(e,t){return e.offset<t.offset+t.length&&e.offset+e.length>t.offset}function a(a,o,s=e.has(o._)){if(s)return a.find(e=>i(e,o));let c=-1,l=-1,u;return a.find(i=>{let{offset:a,length:s}=i;e.has(i._)&&(c=a,l=c+s,u=i._);let d=o._===`messageEntityBlockquote`&&t.has(u);return c!==-1&&o.offset>=c&&o.offset<l&&!n.has(o._)&&!d?!0:o._!==i._&&(r.has(o._)||r.has(i._)||d)?!1:o.offset>=a&&o.length+o.offset<=s+a})}function o(e){e.sort((e,t)=>e.offset-t.offset||t.length-e.length)}export{a as n,o as t};
+//# sourceMappingURL=sortEntities-rSFeJ6lh.js.map

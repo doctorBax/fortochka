@@ -1,0 +1,3 @@
+//# allFunctionsCalledOnLoad
+import{f as e}from"./userAgent-CEMD2GCK.js";function t(t,n){let r={type:t};if(n&&(r.message=n),e){let e=Error();Object.defineProperty(r,"stack",{configurable:!0,enumerable:!0,get(){let t=e.stack;return Object.defineProperty(r,"stack",{value:t,writable:!0,configurable:!0,enumerable:!0}),t}})}return r}export{t};
+//# sourceMappingURL=makeError-BmsJg4PE.js.map
