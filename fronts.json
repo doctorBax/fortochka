@@ -1,0 +1,27 @@
+{
+  "description": "Cloudflare-fronted domains for web Telegram apiws. Fortochka connects to wss://kws{dcId}.<domain>/apiws. PR to add/update domains — health-check picks live ones automatically. Official domain goes last.",
+  "updated": "2026-11-05",
+  "domains": [
+    "pyatdesyatodin.co.uk",
+    "notelega.co.uk",
+    "ebally.co.uk",
+    "nebally.co.uk",
+    "havegreatday.co.uk",
+    "pomogite.co.uk",
+    "fixtelega.co.uk",
+    "sadnews.co.uk",
+    "onedaychamp.co.uk",
+    "stopblocking.co.uk",
+    "nothingthere.co.uk",
+    "cakeisalie.co.uk",
+    "sorokdva.co.uk",
+    "sorokodin.co.uk",
+    "pyatdesyatdva.co.uk",
+    "pclead.co.uk",
+    "offshor.co.uk",
+    "noskomnadzor.co.uk",
+    "lovetrue.co.uk",
+    "kartoshka.co.uk",
+    "web.telegram.org"
+  ]
+}

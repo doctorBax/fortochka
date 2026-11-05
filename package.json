@@ -1,0 +1,82 @@
+{
+  "name": "fortochka",
+  "productName": "Fortochka",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Fortochka — Telegram Web K (webk) как настольное приложение; живые CF-фонты с health-check, DoH, allowlist, автообновления",
+  "main": "main.js",
+  "author": "Fortochka contributors",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doctorBax/fortochka.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "patch-webapp": "node tools/patch-worker-fronts.js",
+    "dist": "electron-builder --win nsis portable",
+    "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "build": {
+    "appId": "io.github.doctorbax.fortochka",
+    "productName": "Fortochka",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "netcore.js",
+      "diagpage.js",
+      "package.json",
+      "webapp/**/*",
+      "vendor/*.exe",
+      "!webapp/**/*.map"
+    ],
+    "asar": false,
+    "protocols": [
+      {
+        "name": "Telegram URL",
+        "schemes": ["tg"]
+      }
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "doctorBax",
+      "repo": "fortochka"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Fortochka",
+      "artifactName": "fortochka-setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "fortochka-portable-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  }
+}

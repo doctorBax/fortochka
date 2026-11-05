@@ -1,0 +1,17 @@
+# сборка / зависимости
+node_modules/
+release/
+build/codesign.pfx
+build/codesign.cer
+*.log
+.DS_Store
+
+# sourcemaps webk — тяжёлые и для работы не нужны
+webapp/**/*.map
+
+# личные инструменты (пути и сертификаты этого компьютера)
+tools/silent-install.ps1
+tools/trust-and-reinstall.ps1
+tools/fix-desktop-lnk.ps1
+tools/create-shortcut.ps1
+tools/make-codesign-cert.ps1
