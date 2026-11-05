@@ -60,15 +60,18 @@ From [Releases](../../releases):
 From [Releases](../../releases): `fortochka-mac-<version>.dmg` (universal: Intel and
 Apple Silicon). Open the DMG, drag Fortochka to Applications.
 
-The app has no Apple Developer signature, so macOS blocks the first launch. One-time
-fix, no Terminal:
+The app has no Apple Developer signature, so macOS blocks the first launch — usually
+with a "damaged and can't be opened, move to trash" dialog (macOS 14–15). The app is
+not damaged: click **Cancel** and remove the quarantine flag once in Terminal
+(Spotlight → "Terminal"):
 
-1. Launch the app. macOS shows a warning — click **Done**.
-2. Open System Settings → Privacy & Security, scroll to the Fortochka entry, click
-   **Open Anyway** → **Open**.
+```
+xattr -cr /Applications/Fortochka.app
+```
 
-On macOS 13 and older: right-click the app → **Open** → **Open**.
-Terminal equivalent: `xattr -cr /Applications/Fortochka.app`.
+If System Settings → Privacy & Security shows an **Open Anyway** button for Fortochka,
+that works too, no Terminal needed. On macOS 13 and older: right-click the app →
+**Open** → **Open**.
 
 Step-by-step guide (in Russian, covers all macOS versions):
 [docs/install-macos.md](docs/install-macos.md).
