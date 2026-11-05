@@ -148,6 +148,12 @@ class FrontManager {
       this.updateTimer = setInterval(() => this.refreshFromRepo(), 3 * 60 * 60 * 1000);
       this.updateTimer.unref && this.updateTimer.unref();
     }
+    // первая проба — быстрая: воркер строит wss-URL по нашему списку, и пока
+    // пробы не сошлись, он может вытащить мёртвый фронт. При реконнектах webk
+    // фронт не переротирует — застревает навсегда (симптом: аватарки в блюре,
+    // медиа-задачи висят без ошибки). serveFrontsScript дожидается этой пробы.
+    this.probesDone = false;
+    this.probeAll(2500).then(() => { this.probesDone = true; this.log('[fronts] первая проба готова'); });
   }
 
   stop() { if (this.updateTimer) clearInterval(this.updateTimer); }
@@ -236,7 +242,7 @@ class FrontManager {
     });
   }
 
-  async probeAll() {
+  async probeAll(timeoutMs = 6000) {
     if (this.probing) return this.probing;
     const { domains } = this.baseList();
     this.probing = Promise.all(domains.map(async (host) => {
@@ -244,7 +250,7 @@ class FrontManager {
       // фронты маршрутизируют только kws{dc}-сабдомены: базовый домен на /apiws
       // не отвечает, поэтому probe бьёт в kws2.<фронт> (иначе все «мёртвые»)
       const probeTarget = host === 'web.telegram.org' || /^kws/.test(host) ? host : 'kws2.' + host;
-      const r = await this.probeHost(probeTarget);
+      const r = await this.probeHost(probeTarget, timeoutMs);
       const failStreak = r.alive ? 0 : ((prev && prev.failStreak || 0) + 1);
       const entry = { alive: r.alive, ms: r.ms, checkedAt: Date.now(), failStreak };
       this.health.set(host, entry);
@@ -260,20 +266,33 @@ class FrontManager {
   }
 
   // /fortochka/fronts.js — importScripts() из webk-воркера (синхронный).
-  // no-store: каждая ротация транспортов получает свежее ранжирование.
+  // no-store: каждая ротация транспортов получает свежий список.
+  // Пока первая проба не сошлась, ответ придерживается (лимит 4.5с): воркер
+  // не должен вытащить мёртвый фронт из ещё непроверенного списка — webk
+  // залипает на выбранном фронтe при реконнектах, и медиа-задачи зависают.
+  // Мёртвые (проверенно не живые) из отдачи исключаются совсем.
   serveFrontsScript(res) {
-    const { domains, source } = this.rankedList();
-    const body = 'self.__fortochkaFronts=' + JSON.stringify(domains)
-      + ';self.__fortochkaFrontsMeta=' + JSON.stringify({ source, at: Date.now() }) + ';';
-    res.writeHead(200, {
-      'content-type': 'text/javascript; charset=utf-8',
-      'cache-control': 'no-store'
-    });
-    res.end(body);
+    (async () => {
+      if (!this.probesDone && this.probing) {
+        await Promise.race([this.probing.catch(() => {}), new Promise((r) => setTimeout(r, 4500))]);
+      }
+      const { domains: ranked, source } = this.rankedList();
+      const domains = ranked.filter((d) => {
+        const h = this.health.get(d);
+        return !(h && h.alive === false);
+      });
+      const body = 'self.__fortochkaFronts=' + JSON.stringify(domains)
+        + ';self.__fortochkaFrontsMeta=' + JSON.stringify({ source, at: Date.now() }) + ';';
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      res.end(body);
+    })().catch(() => { try { res.destroy(); } catch {} });
   }
 
   diag() {
-    const { domains, source } = this.rankedList();
+    const { domains, source } = this.baseList();
     return {
       source,
       domains,

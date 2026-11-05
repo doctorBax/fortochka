@@ -74,7 +74,7 @@ frontManager.startPeriodicProbes();
 // у уже установленных пользователей). Гарантия — снос кэш-папок ДО старта
 // сетевого стека, пока этот процесс ещё не открыл их. Сессия в другом
 // хранилище — не трогается. Увеличивай CACHE_SCHEMA при изменении набора.
-const CACHE_SCHEMA = 2;
+const CACHE_SCHEMA = 3;
 if (state.cacheSchema !== CACHE_SCHEMA) {
   for (const d of ['Cache', 'Code Cache', 'Service Worker', 'GPUCache',
     'DawnGraphiteCache', 'DawnWebGPUCache', 'ShaderCache']) {
@@ -322,6 +322,16 @@ async function handleFortochka(req, res) {
       shell.showItemInFolder(tgwsLogPath()); sendJson(res, 200, {});
     } else if (ep === 'openprofile' && req.method === 'POST') {
       shell.openPath(USER_DATA); sendJson(res, 200, {});
+    } else if (ep === 'exec' && req.method === 'POST' && IS_DEBUG) {
+      // только для отладки (FORTOCHKA_DEBUG=1): выполнить JS в контексте страницы
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 65536) req.destroy(); });
+      req.on('end', () => {
+        if (!win || win.isDestroyed()) { sendJson(res, 200, { ok: false, error: 'no window' }); return; }
+        win.webContents.executeJavaScript(body, true)
+          .then((r) => sendJson(res, 200, { ok: true, result: r === undefined ? null : r }))
+          .catch((e) => sendJson(res, 200, { ok: false, error: String(e && e.message || e) }));
+      });
     } else {
       sendJson(res, 404, { error: 'unknown endpoint' });
     }
@@ -545,6 +555,39 @@ function createWindow() {
   });
 
   win.loadURL(`http://127.0.0.1:${WEB_PORT}/`);
+
+  if (IS_DEBUG) {
+    // CDP-глазами: все внешние запросы страницы/воркеров и их провалы —
+    // то, что не видно ни в консоли, ни в логе шимма
+    try {
+      win.webContents.debugger.attach('1.3');
+      win.webContents.debugger.sendCommand('Network.enable').catch(() => {});
+      win.webContents.debugger.on('message', (e, method, params) => {
+        const u = (params.request || params.response || params || {}).url;
+        const short = String(u || '').slice(0, 150);
+        if (method === 'Network.requestWillBeSent' && !u.startsWith(`http://127.0.0.1:${WEB_PORT}/`)) {
+          console.log('[net]', params.type, short);
+        } else if (method === 'Network.webSocketCreated') {
+          console.log('[ws-open]', short);
+        } else if (method === 'Network.webSocketHandshakeResponseReceived') {
+          console.log('[ws-resp]', params.response.status, short);
+        } else if (method === 'Network.loadingFailed') {
+          console.log('[net-FAIL]', params.errorText, params.type, params.canceled ? '(canceled)' : '');
+        } else if (method === 'Network.responseReceived' && params.response.status >= 400) {
+          console.log('[net-' + params.response.status + ']', short);
+        }
+      });
+      // счётчик битых <img> через 15с после загрузки
+      setTimeout(() => {
+        win.webContents.executeJavaScript(`(() => {
+          const imgs = [...document.querySelectorAll('img')];
+          const broken = imgs.filter((i) => i.complete && i.naturalWidth === 0);
+          return { total: imgs.length, broken: broken.length,
+            sample: broken.slice(0, 5).map((i) => String(i.src).slice(0, 90)) };
+        })()`, true).then((r) => console.log('[imgs]', JSON.stringify(r))).catch(() => {});
+      }, 15000);
+    } catch (e) { log('[debug] debugger: ' + e.message); }
+  }
 }
 
 // mac: настоящее меню-бар (Cmd+C/V/X работают в webk через роли editMenu,

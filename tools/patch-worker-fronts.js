@@ -72,6 +72,35 @@ for (const f of files) {
     process.exit(1);
   }
 
+  // 3) module-воркер (грузится через import()): importScripts() там кидает
+  //    ReferenceError, т.е. живой список в нём не работал НИКОГДА — всегда
+  //    вшитый фолбэк. Подгружаем список fetch'ем при старте воркера (без eval,
+  //    чтобы не драться с CSP): парсим массив из ответа и кладём в
+  //    self.__fortochkaFronts — строитель подхватит с первого запроса.
+  if (!src.includes('__fortochkaPrefetchFlag')) {
+    const prefetch =
+      'try{fetch("/fortochka/fronts.js").then((r)=>r.text()).then((t)=>{' +
+      'try{const m=t.match(/\\[[^\\[\\]]*\\]/);if(m)self.__fortochkaFronts=JSON.parse(m[0])}catch(e){}})' +
+      '.catch(()=>{})}catch(e){}self.__fortochkaPrefetchFlag=1;';
+    src = prefetch + src;
+    console.log(f + ': prefetch живого списка добавлен (module-воркер)');
+  } else {
+    console.log(f + ': prefetch уже стоит, пропуск');
+  }
+
+  // 4) вшитый фолбэк: официальный web.telegram.org сидит в нём намертво, а на
+  //    цензурированных сетях его TCP мёртв — транспорт докачки выбирает его
+  //    (1 из 6), виснет навсегда и тянет за собой все задачи этого DC.
+  //    Живость официального решает health-check в отдаче списка; фолбэк —
+  //    только живые на момент старта фронты сообщества.
+  const officialRe = /,`web\.telegram\.org`\]/;
+  if (officialRe.test(src)) {
+    src = src.replace(officialRe, ']');
+    console.log(f + ': web.telegram.org убран из вшитого фолбэка');
+  } else {
+    console.log(f + ': официального во фолбэке уже нет, пропуск');
+  }
+
   fs.writeFileSync(file, src);
 }
 console.log('done');
