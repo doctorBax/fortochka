@@ -12,8 +12,9 @@
 
 ## Установка
 
-1. Скачайте `fortochka-mac-0.2.0.dmg` со страницы
-   [Releases](https://github.com/doctorBax/fortochka/releases/latest) — файл около 150 МБ.
+1. Скачайте DMG со страницы
+   [Releases](https://github.com/doctorBax/fortochka/releases/latest) — файл вида
+   `fortochka-mac-0.2.3.dmg` (число — версия, берите самую большую) размером около 150 МБ.
 2. Откройте скачанный DMG двойным кликом.
 3. Перетащите иконку Fortochka на папку Applications, которая рядом в окне.
 4. Дождитесь окончания копирования, закройте окно и извлеките диск
