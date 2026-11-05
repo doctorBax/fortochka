@@ -28,6 +28,7 @@ const DIAG_PAGE = require('./diagpage');
 const IS_SMOKE = process.argv.includes('--smoke');
 const IS_DIRECT = process.argv.includes('--direct'); // без прокси-цепочки, wss напрямую (для отладки)
 const IS_HIDDEN = process.argv.includes('--hidden'); // автостарт свёрнутым
+const IS_DEBUG = !!process.env.FORTOCHKA_DEBUG;      // подробные логи страницы: CSP-блоки, ошибки загрузки
 const trace = (...a) => { if (IS_SMOKE) console.log('[trace]', ...a); };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
@@ -489,6 +490,18 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     trace('did-finish-load');
+    if (IS_DEBUG) {
+      // ловим в рендерере то, что иначе тонет: CSP-блоки и незагрузившиеся ресурсы
+      win.webContents.executeJavaScript(`(() => {
+        document.addEventListener('securitypolicyviolation', (e) =>
+          console.warn('[CSP-BLOCK]', e.violatedDirective, e.blockedURI));
+        document.addEventListener('error', (e) => {
+          const t = e.target;
+          if (t && t.tagName && (t.src || t.href))
+            console.warn('[LOAD-FAIL]', t.tagName, String(t.src || t.href).slice(0, 140));
+        }, true);
+      })()`, true).catch(() => {});
+    }
     if (IS_MAC) {
       // traffic lights живут поверх шапки webk: сдвигаем её контент правее,
       // а саму шапку делаем областью перетаскивания окна (кнопки/поиск — нет)
@@ -508,9 +521,9 @@ function createWindow() {
   win.webContents.on('did-fail-load', (e, code, desc, url) => {
     trace('did-fail-load', code, desc, url);
   });
-  // в smoke — консоль рендерера: webk логирует туда MTProto-ошибки
+  // в smoke/debug — консоль рендерера: webk логирует туда MTProto-ошибки
   win.webContents.on('console-message', (e, level, message, line, sourceId) => {
-    if (IS_SMOKE) console.log('[console]', String(message).slice(0, 200));
+    if (IS_SMOKE || IS_DEBUG) console.log('[console]', String(message).slice(0, 200));
   });
 
   win.loadURL(`http://127.0.0.1:${WEB_PORT}/`);
@@ -709,8 +722,17 @@ app.on('second-instance', (e, argv) => {
 // mac: клик по иконке в доке возвращает окно (окно закрыто -> спрятано в трей)
 app.on('activate', () => { if (!IS_SMOKE) showWindow(); });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   try {
+    // HTTP-кэш Chromium переживает перезапуски, а хешированные ассеты webk
+    // отдаются immutable на год: пропатченный бандл с тем же именем не
+    // подхватится у пользователей. Сбрасываем кэш один раз на новую версию.
+    if (state.cacheVersion !== app.getVersion()) {
+      try { await session.defaultSession.clearCache(); } catch {}
+      state.cacheVersion = app.getVersion();
+      netcore.saveState(stateFile, state);
+      log('[cache] сброшен под версию ' + app.getVersion());
+    }
     configureSession();
     trace('session ok');
     startTgws();

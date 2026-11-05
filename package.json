@@ -1,7 +1,7 @@
 {
   "name": "fortochka",
   "productName": "Fortochka",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Fortochka — Telegram Web K (webk) как настольное приложение; живые CF-фонты с health-check, DoH, allowlist, автообновления",
   "main": "main.js",
@@ -43,7 +43,9 @@
     "protocols": [
       {
         "name": "Telegram URL",
-        "schemes": ["tg"]
+        "schemes": [
+          "tg"
+        ]
       }
     ],
     "publish": {
@@ -55,11 +57,15 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         },
         {
           "target": "dmg",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         }
       ],
       "icon": "build/icon.png",
@@ -70,21 +76,37 @@
     "dmg": {
       "title": "Fortochka ${version}",
       "background": "build/dmg-background.png",
-      "window": { "width": 660, "height": 400 },
+      "window": {
+        "width": 660,
+        "height": 400
+      },
       "contents": [
-        { "x": 180, "y": 200, "type": "file" },
-        { "x": 480, "y": 200, "type": "link", "path": "/Applications" }
+        {
+          "x": 180,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 480,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico"

@@ -241,7 +241,10 @@ class FrontManager {
     const { domains } = this.baseList();
     this.probing = Promise.all(domains.map(async (host) => {
       const prev = this.health.get(host);
-      const r = await this.probeHost(host);
+      // фронты маршрутизируют только kws{dc}-сабдомены: базовый домен на /apiws
+      // не отвечает, поэтому probe бьёт в kws2.<фронт> (иначе все «мёртвые»)
+      const probeTarget = host === 'web.telegram.org' || /^kws/.test(host) ? host : 'kws2.' + host;
+      const r = await this.probeHost(probeTarget);
       const failStreak = r.alive ? 0 : ((prev && prev.failStreak || 0) + 1);
       const entry = { alive: r.alive, ms: r.ms, checkedAt: Date.now(), failStreak };
       this.health.set(host, entry);
