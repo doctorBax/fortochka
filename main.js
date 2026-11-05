@@ -110,7 +110,19 @@ function openTgwsLog() {
 // ---------- tg-ws-proxy-rs как child process ----------
 let tgwsProc = null;
 let tgwsFailures = 0;
+let tgwsRestarting = false;
 let quitting = false;
+
+// общий перезапуск для 'exit' и 'error': флаг не даёт удвоить таймер,
+// если придут оба события
+function scheduleTgwsRestart(fd, why) {
+  if (quitting || tgwsRestarting) return;
+  tgwsRestarting = true;
+  tgwsFailures = Math.min(tgwsFailures + 1, 6);
+  const delay = Math.min(2000 * Math.pow(2, tgwsFailures - 1), 30000);
+  try { fs.writeSync(fd, `[supervisor] ${why}, перезапуск через ${delay}мс\n`); } catch {}
+  setTimeout(() => { tgwsRestarting = false; startTgws(); }, delay);
+}
 
 function startTgws() {
   if (quitting || !fs.existsSync(TGWS_EXE)) return;
@@ -125,13 +137,10 @@ function startTgws() {
   }
   if (!IS_DIRECT) args.push('--no-outbound-proxy'); // не подхватывать случайные HTTP(S)_PROXY
   tgwsProc = spawn(TGWS_EXE, args, { windowsHide: true, stdio: ['ignore', fd, fd] });
-  tgwsProc.on('exit', (code) => {
-    if (quitting) return;
-    tgwsFailures = Math.min(tgwsFailures + 1, 6);
-    const delay = Math.min(2000 * Math.pow(2, tgwsFailures - 1), 30000);
-    fs.writeSync(fd, `[supervisor] процесс вышел (code=${code}), перезапуск через ${delay}мс\n`);
-    setTimeout(startTgws, delay);
-  });
+  tgwsProc.on('exit', (code) => scheduleTgwsRestart(fd, `процесс вышел (code=${code})`));
+  // без обработчика 'error' неудачный спавн (нет прав/файла) крешит main
+  // молча — окно вообще не откроется. Лог + перезапуск по бэкоффу.
+  tgwsProc.on('error', (e) => scheduleTgwsRestart(fd, 'spawn error: ' + (e && e.message || e)));
   tgwsProc.on('spawn', () => { tgwsFailures = 0; });
 }
 
@@ -787,13 +796,14 @@ app.whenReady().then(async () => {
   try {
     configureSession();
     trace('session ok');
-    startTgws();
-    trace('tgws spawned');
     startWebServer();
     trace('web server ok');
-    registerProtocol();
+    // окно раньше движка: что бы ни случилось со спавном бинарника,
+    // окно уже открыто, а движок доедет (webk сам переподключается)
     createWindow();
     trace('window created');
+    startTgws();
+    trace('tgws spawned');
     setupMacMenu();
     createTray();
     setupUpdater();

@@ -1,7 +1,7 @@
 {
   "name": "fortochka",
   "productName": "Fortochka",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Fortochka — Telegram Web K (webk) как настольное приложение; живые CF-фонты с health-check, DoH, allowlist, автообновления",
   "main": "main.js",
