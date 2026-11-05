@@ -24,7 +24,8 @@ jobs:
         run: npm ci
 
       - name: Build (zip + dmg, universal)
-        run: npm run dist:mac
+        # publish never: токен нужен только шагу загрузки ниже (gh release upload)
+        run: npm run dist:mac -- --publish never
         env:
           # нет Apple-сертификата — electron-builder подписывает ad-hoc,
           # Gatekeeper обходится xattr (см. README)
