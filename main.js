@@ -67,6 +67,24 @@ const allowlist = new netcore.Allowlist(config, frontManager);
 frontManager.start();
 frontManager.startPeriodicProbes();
 
+// ---------- сброс кэша Chromium при смене схемы ----------
+// Хешированные бандлы webk отдаются immutable на год; session.clearCache()
+// не гарантирует чистку дискового HTTP-кэша, Code Cache и кэшей service
+// worker — старый бандл может пересиживать обновления (так умер фикс медиа
+// у уже установленных пользователей). Гарантия — снос кэш-папок ДО старта
+// сетевого стека, пока этот процесс ещё не открыл их. Сессия в другом
+// хранилище — не трогается. Увеличивай CACHE_SCHEMA при изменении набора.
+const CACHE_SCHEMA = 2;
+if (state.cacheSchema !== CACHE_SCHEMA) {
+  for (const d of ['Cache', 'Code Cache', 'Service Worker', 'GPUCache',
+    'DawnGraphiteCache', 'DawnWebGPUCache', 'ShaderCache']) {
+    try { fs.rmSync(path.join(USER_DATA, d), { recursive: true, force: true }); } catch {}
+  }
+  state.cacheSchema = CACHE_SCHEMA;
+  netcore.saveState(stateFile, state);
+  log('[cache] кэш Chromium сброшен (schema ' + CACHE_SCHEMA + ')');
+}
+
 // ---------- IP контроллеров (для проверки tg-ws-proxy в smoke) ----------
 // ВАЖНО: веб-эндпоинты wss (*.web.telegram.org) живут на ДРУГИХ IP
 // (например kws2 -> 149.154.167.99), поэтому CONNECT-шимм НЕ мапит домены
@@ -724,15 +742,6 @@ app.on('activate', () => { if (!IS_SMOKE) showWindow(); });
 
 app.whenReady().then(async () => {
   try {
-    // HTTP-кэш Chromium переживает перезапуски, а хешированные ассеты webk
-    // отдаются immutable на год: пропатченный бандл с тем же именем не
-    // подхватится у пользователей. Сбрасываем кэш один раз на новую версию.
-    if (state.cacheVersion !== app.getVersion()) {
-      try { await session.defaultSession.clearCache(); } catch {}
-      state.cacheVersion = app.getVersion();
-      netcore.saveState(stateFile, state);
-      log('[cache] сброшен под версию ' + app.getVersion());
-    }
     configureSession();
     trace('session ok');
     startTgws();
