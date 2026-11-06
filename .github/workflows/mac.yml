@@ -1,10 +1,16 @@
 name: mac-build
 
 # Сборка macOS-релиза Fortochka: universal zip + dmg, ad-hoc подпись (без
-# Apple Developer), смоук-тест прямо на раннере, артефакты — в существующий
-# релиз. Запуск вручную: Actions → mac-build → Run workflow.
+# Apple Developer), два смоука прямо на раннере (из репозитория и установленный
+# пакет), артефакты — в существующий релиз. Запуск вручную: Actions → mac-build
+# → Run workflow. upload=false — только проверка, релиз не трогаем.
 on:
   workflow_dispatch:
+    inputs:
+      upload:
+        description: 'Заливать артефакты в релиз (false = только проверка)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -31,10 +37,25 @@ jobs:
           # Gatekeeper обходится xattr (см. README)
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: Smoke test on the runner
+      - name: Smoke test on the runner (from repo)
         run: npm run smoke
 
+      - name: Packaged app smoke (install like a user + launch + diag API)
+        run: |
+          VER="$(node -p "require('./package.json').version")"
+          bash tools/mac-packaged-smoke.sh \
+            "release/fortochka-mac-$VER.dmg" "$VER" packaged-smoke-macos.png
+
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-smoke-macos
+          path: packaged-smoke-macos.png
+          if-no-files-found: ignore
+
       - name: Upload artifacts to release
+        if: ${{ inputs.upload }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -45,5 +66,6 @@ jobs:
             release/fortochka-mac-*.zip \
             release/fortochka-mac-*.dmg \
             release/latest-mac.yml \
+            packaged-smoke-macos.png \
             --clobber
           gh release view "$VER"
