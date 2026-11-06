@@ -22,8 +22,14 @@ const OLD_PROFILE_NAME = 'tgweb-desktop'; // профиль до публичн�
 
 // Канонический список фронтов живёт в самом репо: PR с новым доменом = новый
 // фронт у всех пользователей без релиза (health-check отсеет мёртвые).
-const FRONT_LIST_URL = process.env.FORTOCHKA_FRONT_LIST_URL
-  || 'https://raw.githubusercontent.com/doctorBax/fortochka/main/fronts.json';
+// raw.githubusercontent недоступен с голых российских сетей — зеркала jsdelivr.
+const FRONT_LIST_URLS = process.env.FORTOCHKA_FRONT_LIST_URL
+  ? [process.env.FORTOCHKA_FRONT_LIST_URL]
+  : [
+      'https://raw.githubusercontent.com/doctorBax/fortochka/main/fronts.json',
+      'https://cdn.jsdelivr.net/gh/doctorBax/fortochka@main/fronts.json',
+      'https://fastly.jsdelivr.net/gh/doctorBax/fortochka@main/fronts.json'
+    ];
 
 // Вшитый дефолт — то, с чего всё начинается (совпадает с fronts.json в репо).
 // Домены сообщества мрут регулярно — актуальный список едет из репо
@@ -53,10 +59,15 @@ const DEFAULT_FRONTS = [
   'web.telegram.org' // официальный — всегда последним
 ];
 
+// Порядок: JSON-API глобально быстрые первыми, затем RFC 8484 wireformat
+// (AdGuard/Comss — работают с голых российских сетей, где dns.google,
+// cloudflare-dns.com и 1.1.1.1 заблокированы; без чистого DNS фронты не
+// резолвятся и в диагностике выглядит это как «все хосты мертвы»).
 const DEFAULT_DOH = [
   'https://dns.google/resolve',
   'https://cloudflare-dns.com/dns-query',
-  'https://1.1.1.1/dns-query'
+  'https://unfiltered.adguard-dns.com/dns-query',
+  'https://dns.comss.one/dns-query'
 ];
 
 const DEFAULT_CONFIG = {
@@ -159,23 +170,27 @@ class FrontManager {
   stop() { if (this.updateTimer) clearInterval(this.updateTimer); }
 
   async refreshFromRepo() {
-    try {
-      const res = await fetch(FRONT_LIST_URL, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const j = await res.json();
-      const domains = (Array.isArray(j) ? j : j.domains || [])
-        .map((d) => String(d).trim().toLowerCase()).filter(Boolean);
-      if (!domains.length) throw new Error('пустой список');
-      this.fetched = { domains, source: FRONT_LIST_URL, at: new Date().toISOString() };
+    for (const url of FRONT_LIST_URLS) {
       try {
-        fs.writeFileSync(path.join(path.dirname(this.stateFile), 'fronts-cache.json'),
-          JSON.stringify(this.fetched, null, 2));
-      } catch {}
-      this.log('[fronts] обновлено из репо: ' + domains.length + ' доменов');
-    } catch (e) {
-      // сеть может быть блокирована до коннекта — это нормально, живёт кэш/дефолт
-      this.log('[fronts] автообновление пропущено: ' + (e.message || e));
+        const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        const domains = (Array.isArray(j) ? j : j.domains || [])
+          .map((d) => String(d).trim().toLowerCase()).filter(Boolean);
+        if (!domains.length) throw new Error('пустой список');
+        this.fetched = { domains, source: url, at: new Date().toISOString() };
+        try {
+          fs.writeFileSync(path.join(path.dirname(this.stateFile), 'fronts-cache.json'),
+            JSON.stringify(this.fetched, null, 2));
+        } catch {}
+        this.log('[fronts] обновлено из репо (' + url + '): ' + domains.length + ' доменов');
+        return;
+      } catch (e) {
+        // сеть может быть блокирована до коннекта — переходим к следующему зеркалу
+        this.log('[fronts] источник недоступен (' + url + '): ' + (e.message || e));
+      }
     }
+    this.log('[fronts] автообновление пропущено — живёт кэш/дефолт');
   }
 
   // базовый список без ранжирования
@@ -302,6 +317,49 @@ class FrontManager {
 }
 
 // ---------- DNS-over-HTTPS ----------
+// RFC 8484 wireformat: сборка A-запроса и разбор ответа (только нужное —
+// тип A, сжатые имена). Нужен для AdGuard/Comss, JSON-API не понимающих.
+function buildDnsQuery(name) {
+  const hdr = Buffer.from([0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const labels = String(name).split('.').map((l) => {
+    const b = Buffer.from(l);
+    return Buffer.concat([Buffer.from([b.length]), b]);
+  });
+  return Buffer.concat([hdr, ...labels, Buffer.from([0, 0, 0, 1, 0, 1])]); // root, A, IN
+}
+
+function parseDnsA(buf) {
+  try {
+    if ((buf.readUInt16BE(2) & 0x000F) !== 0) return []; // rcode != 0
+    const qd = buf.readUInt16BE(4), an = buf.readUInt16BE(6);
+    let off = 12;
+    const skipName = () => {
+      while (off < buf.length) {
+        const l = buf[off++];
+        if (!l) break;
+        if (l & 0xC0) { off++; break; } // сжатое имя — указатель, два байта
+        off += l;
+      }
+    };
+    for (let i = 0; i < qd; i++) { skipName(); off += 4; }
+    const ips = [];
+    for (let i = 0; i < an && off + 10 <= buf.length; i++) {
+      skipName();
+      const type = buf.readUInt16BE(off); off += 2;
+      off += 2; // class
+      off += 4; // ttl
+      const rdlen = buf.readUInt16BE(off); off += 2;
+      if (type === 1 && rdlen === 4) {
+        ips.push([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]].join('.'));
+      }
+      off += rdlen;
+    }
+    return ips;
+  } catch {
+    return [];
+  }
+}
+
 class DohResolver {
   constructor(config, log) {
     this.config = config;
@@ -322,23 +380,46 @@ class DohResolver {
     const hit = this.cache.get(host);
     if (hit && hit.until > Date.now()) return hit.ips;
     for (const u of this.urls()) {
-      try {
-        const sep = u.includes('?') ? '&' : '?';
-        const res = await fetch(u + sep + 'name=' + encodeURIComponent(host) + '&type=A', {
-          headers: { accept: 'application/dns-json' },
-          signal: AbortSignal.timeout(4000)
-        });
-        if (!res.ok) continue;
-        const j = await res.json();
-        const ips = (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
-        if (ips.length) {
-          this.workingUrl = u;
-          this.cache.set(host, { ips, until: Date.now() + 10 * 60 * 1000 });
-          return ips;
-        }
-      } catch {}
+      const ips = await this.queryOne(u, host);
+      if (ips && ips.length) {
+        this.workingUrl = u;
+        this.cache.set(host, { ips, until: Date.now() + 10 * 60 * 1000 });
+        return ips;
+      }
     }
     return null; // фолбэк — системный DNS в CONNECT-шимме
+  }
+
+  // Google/Cloudflare отвечают JSON на GET; AdGuard/Comss понимают только
+  // RFC 8484 (wireformat POST) — на одном URL пробуем оба формата.
+  async queryOne(u, host) {
+    try {
+      const sep = u.includes('?') ? '&' : '?';
+      const res = await fetch(u + sep + 'name=' + encodeURIComponent(host) + '&type=A', {
+        headers: { accept: 'application/dns-json' },
+        signal: AbortSignal.timeout(4000)
+      });
+      if (res.ok && String(res.headers.get('content-type') || '').includes('json')) {
+        const j = await res.json();
+        return (j.Answer || []).filter((a) => a.type === 1).map((a) => a.data);
+      }
+    } catch {}
+    return this.queryWire(u, host);
+  }
+
+  async queryWire(u, host) {
+    try {
+      const res = await fetch(u, {
+        method: 'POST',
+        headers: { 'content-type': 'application/dns-message' },
+        body: buildDnsQuery(host),
+        signal: AbortSignal.timeout(4000)
+      });
+      if (!res.ok) return null;
+      return parseDnsA(Buffer.from(await res.arrayBuffer()));
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -381,7 +462,7 @@ class Allowlist {
 }
 
 module.exports = {
-  APP_NAME, DEFAULT_FRONTS, DEFAULT_CONFIG, FRONT_LIST_URL,
+  APP_NAME, DEFAULT_FRONTS, DEFAULT_CONFIG, FRONT_LIST_URLS,
   migrateProfile, setupProfile, loadState, saveState,
   FrontManager, DohResolver, Allowlist
 };
