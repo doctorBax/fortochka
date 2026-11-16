@@ -59,7 +59,51 @@ if (!gotTheLock) {
 const { config, configFile, stateFile } = netcore.setupProfile(USER_DATA);
 const state = netcore.loadState(stateFile);
 const WEB_PORT = config.ports.web;   // локальный HTTP+CONNECT (статика webk + шимм)
-const SOCKS_PORT = config.ports.socks; // tg-ws-proxy-rs SOCKS
+let SOCKS_PORT = config.ports.socks; // tg-ws-proxy-rs SOCKS
+
+// Если рядом уже запущен отдельный TG WS Proxy, не уходим в бесконечный
+// цикл перезапусков с EADDRINUSE: выбираем свободный локальный порт.
+function isLocalPortFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    probe.once('error', () => finish(false));
+    probe.once('listening', () => {
+      probe.close(() => finish(true));
+    });
+    try {
+      probe.listen(port, '127.0.0.1');
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+async function chooseSocksPort() {
+  const preferred = Number(config.ports && config.ports.socks) || 1080;
+  const candidates = [];
+  for (let offset = 0; offset <= 32; offset++) {
+    const candidate = preferred + offset;
+    if (candidate > 0 && candidate < 65536 && candidate !== WEB_PORT) {
+      candidates.push(candidate);
+    }
+  }
+  for (const candidate of candidates) {
+    if (await isLocalPortFree(candidate)) {
+      if (candidate !== preferred) {
+        log(`[socks] порт ${preferred} занят, использую свободный ${candidate}`);
+      }
+      SOCKS_PORT = candidate;
+      return;
+    }
+  }
+  throw new Error(`Не найден свободный SOCKS-порт рядом с ${preferred}`);
+}
 
 const doh = new netcore.DohResolver(config, log);
 const frontManager = new netcore.FrontManager(config, stateFile, log, doh);
@@ -796,6 +840,7 @@ app.whenReady().then(async () => {
   try {
     configureSession();
     trace('session ok');
+    await chooseSocksPort();
     startWebServer();
     trace('web server ok');
     // окно раньше движка: что бы ни случилось со спавном бинарника,
