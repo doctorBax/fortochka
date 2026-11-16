@@ -58,8 +58,9 @@ if (!gotTheLock) {
 // ---------- конфиг и сетевое ядро ----------
 const { config, configFile, stateFile } = netcore.setupProfile(USER_DATA);
 const state = netcore.loadState(stateFile);
-const WEB_PORT = config.ports.web;   // локальный HTTP+CONNECT (статика webk + шимм)
+let WEB_PORT = config.ports.web;     // локальный HTTP+CONNECT (статика webk + шимм)
 let SOCKS_PORT = config.ports.socks; // tg-ws-proxy-rs SOCKS
+let MTPROTO_PORT = (config.ports && config.ports.mtproto) || 1443;
 
 // Если рядом уже запущен отдельный TG WS Proxy, не уходим в бесконечный
 // цикл перезапусков с EADDRINUSE: выбираем свободный локальный порт.
@@ -84,25 +85,35 @@ function isLocalPortFree(port) {
   });
 }
 
-async function chooseSocksPort() {
-  const preferred = Number(config.ports && config.ports.socks) || 1080;
+async function choosePort(preferred, excluded = []) {
   const candidates = [];
   for (let offset = 0; offset <= 32; offset++) {
     const candidate = preferred + offset;
-    if (candidate > 0 && candidate < 65536 && candidate !== WEB_PORT) {
+    if (candidate > 0 && candidate < 65536 && !excluded.includes(candidate)) {
       candidates.push(candidate);
     }
   }
   for (const candidate of candidates) {
     if (await isLocalPortFree(candidate)) {
-      if (candidate !== preferred) {
-        log(`[socks] порт ${preferred} занят, использую свободный ${candidate}`);
-      }
-      SOCKS_PORT = candidate;
-      return;
+      return candidate;
     }
   }
-  throw new Error(`Не найден свободный SOCKS-порт рядом с ${preferred}`);
+  throw new Error(`Не найден свободный порт рядом с ${preferred}`);
+}
+
+async function chooseServicePorts() {
+  const requested = [
+    ['web', Number(config.ports && config.ports.web) || 1081],
+    ['socks', Number(config.ports && config.ports.socks) || 1080],
+    ['mtproto', Number(config.ports && config.ports.mtproto) || 1443]
+  ];
+  const selected = [];
+  for (const [name, preferred] of requested) {
+    const port = await choosePort(preferred, selected);
+    if (port !== preferred) log(`[ports] ${name}: ${preferred} занят, использую ${port}`);
+    selected.push(port);
+  }
+  [WEB_PORT, SOCKS_PORT, MTPROTO_PORT] = selected;
 }
 
 const doh = new netcore.DohResolver(config, log);
@@ -151,6 +162,15 @@ function openTgwsLog() {
   return tgwsLogFd;
 }
 
+function logRuntimeError(kind, error) {
+  const detail = error && (error.stack || error.message) || String(error);
+  log(`[${kind}] ${detail}`);
+  try { fs.writeFileSync(path.join(USER_DATA, 'runtime-errors.log'), `${new Date().toISOString()} [${kind}] ${detail}\n`, { flag: 'a' }); } catch {}
+}
+
+process.on('uncaughtException', (error) => logRuntimeError('uncaught', error));
+process.on('unhandledRejection', (reason) => logRuntimeError('unhandled-rejection', reason));
+
 // ---------- tg-ws-proxy-rs как child process ----------
 let tgwsProc = null;
 let tgwsFailures = 0;
@@ -173,8 +193,7 @@ function startTgws() {
   const fd = openTgwsLog();
   // MTProto-порт тоже конфигурируется: два экземпляра на одной машине
   // (например смоук рядом с работающим приложением) не должны драться за 1443
-  const mtprotoPort = (config.ports && config.ports.mtproto) || 1443;
-  const args = ['--host', '127.0.0.1', '--port', String(mtprotoPort),
+  const args = ['--host', '127.0.0.1', '--port', String(MTPROTO_PORT),
     '--socks-enabled', '--socks-port', String(SOCKS_PORT), '--default-domains'];
   if (Array.isArray(config.workerDomains) && config.workerDomains.length) {
     for (const d of config.workerDomains) args.push('--cf-worker-domain', d); // свой CF Worker
@@ -840,7 +859,7 @@ app.whenReady().then(async () => {
   try {
     configureSession();
     trace('session ok');
-    await chooseSocksPort();
+    await chooseServicePorts();
     startWebServer();
     trace('web server ok');
     // окно раньше движка: что бы ни случилось со спавном бинарника,
