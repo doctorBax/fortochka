@@ -336,22 +336,30 @@ function pipe(a, b) {
 function onConnect(req, clientSocket, head) {
   const [host, portStr] = req.url.split(':');
   const port = +portStr || 443;
+  clientSocket.on('error', () => {});
+  // A failed or cancelled Chromium connection must not leave an orphaned
+  // upstream socket after an asynchronous DNS lookup.
+  clientSocket.setTimeout(15000, () => clientSocket.destroy());
   if (port !== 443 || !allowlist.allows(host)) {
     log('[connect] заблокирован allowlist-ом: ' + host);
     clientSocket.destroy();
     return;
   }
-  // Чистый TCP-релей: TLS end-to-end между Chromium и Telegram. SNI шлёт сам
-  // Chromium, поэтому шимму достаточно коннектиться в IP (или в имя — его
-  // резолвит ОС). Веб-эндпоинты *.web.telegram.org живут на своих IP,
-  // не на raw-MTProto адресах контроллеров. Почему не tgws-SOCKS — в README.
   (async () => {
-    const ips = await doh.lookup(host).catch((e) => { log('[doh] ошибка ' + host + ': ' + e.message); return null; });
+    const ips = await doh.lookup(host).catch((e) => {
+      log('[doh] ошибка ' + host + ': ' + e.message);
+      return null;
+    });
+    if (clientSocket.destroyed) return;
     const target = ips && ips.length ? ips[Math.floor(Math.random() * ips.length)] : host;
     log('[connect] ' + host + ' -> ' + target + (ips ? ' (DoH)' : ' (system)'));
     const upstream = net.connect(port, target);
+    upstream.setTimeout(15000, () => upstream.destroy());
     upstream.on('connect', () => {
+      if (clientSocket.destroyed) { upstream.destroy(); return; }
       log('[connect] ' + host + ' -> установлен');
+      clientSocket.setTimeout(0);
+      upstream.setTimeout(0);
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length) upstream.write(head);
       pipe(clientSocket, upstream);
@@ -360,8 +368,11 @@ function onConnect(req, clientSocket, head) {
       log('[connect] ' + host + ' upstream error: ' + e.message);
       clientSocket.destroy();
     });
-    clientSocket.on('error', () => {});
-  })();
+    clientSocket.once('close', () => upstream.destroy());
+  })().catch((e) => {
+    log('[connect] ' + host + ' internal error: ' + (e.message || e));
+    clientSocket.destroy();
+  });
 }
 
 // ---------- /fortochka/* — маршруты для webk и страницы диагностики ----------
