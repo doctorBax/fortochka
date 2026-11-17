@@ -33,6 +33,8 @@
     "files": [
       "main.js",
       "netcore.js",
+      "updatecheck.js",
+      "staticserve.js",
       "diagpage.js",
       "package.json",
       "webapp/**/*",
