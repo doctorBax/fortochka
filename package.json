@@ -14,6 +14,7 @@
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
+    "test": "node --test",
     "patch-webapp": "node tools/patch-worker-fronts.js",
     "dist": "electron-builder --win nsis portable",
     "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx",
