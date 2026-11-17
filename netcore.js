@@ -269,17 +269,33 @@ class FrontManager {
   async probeAll(timeoutMs = 6000) {
     if (this.probing) return this.probing;
     const { domains } = this.baseList();
-    this.probing = Promise.all(domains.map(async (host) => {
-      const prev = this.health.get(host);
-      // фронты маршрутизируют только kws{dc}-сабдомены: базовый домен на /apiws
-      // не отвечает, поэтому probe бьёт в kws2.<фронт> (иначе все «мёртвые»)
-      const probeTarget = /^kws\d/.test(host) ? host : 'kws2.' + host;
-      const r = await this.probeHost(probeTarget, timeoutMs);
-      const failStreak = r.alive ? 0 : ((prev && prev.failStreak || 0) + 1);
-      const entry = { alive: r.alive, ms: r.ms, checkedAt: Date.now(), failStreak };
-      this.health.set(host, entry);
-      return { host, ...entry };
-    })).finally(() => { this.probing = null; });
+    // Limit simultaneous DoH + TLS probes. Probing every front at once
+    // causes short-lived socket/heap spikes on startup, especially on Windows.
+    const results = new Array(domains.length);
+    let nextIndex = 0;
+    const probeWorker = async () => {
+      while (nextIndex < domains.length) {
+        const index = nextIndex++;
+        const host = domains[index];
+        const previous = this.health.get(host);
+        const probeTarget = /^kws\d/.test(host) ? host : 'kws2.' + host;
+        let result;
+        try { result = await this.probeHost(probeTarget, timeoutMs); }
+        catch { result = { alive: false, ms: null }; }
+        const failStreak = result.alive ? 0 : ((previous && previous.failStreak || 0) + 1);
+        const entry = {
+          alive: result.alive,
+          ms: result.ms,
+          checkedAt: Date.now(),
+          failStreak
+        };
+        this.health.set(host, entry);
+        results[index] = { host, ...entry };
+      }
+    };
+    this.probing = Promise.all(
+      Array.from({ length: Math.min(10, domains.length) }, () => probeWorker())
+    ).then(() => results).finally(() => { this.probing = null; });
     return this.probing;
   }
 
