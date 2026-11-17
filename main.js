@@ -23,8 +23,13 @@ const { spawn } = require('child_process');
 
 const netcore = require('./netcore');
 const { serveStaticFile } = require('./staticserve');
-const { RELEASES_URL, getLatestVersion, compareVersions } = require('./updatecheck');
+const { RELEASES_URL, BETA_RELEASES_URL, getLatestVersion, compareVersions } = require('./updatecheck');
 const DIAG_PAGE = require('./diagpage');
+
+// The beta package is renamed by tools/prepare-beta.js in CI.
+const IS_BETA = require('./package.json').name === 'fortochka-beta';
+const UPDATE_RELEASES_URL = IS_BETA ? BETA_RELEASES_URL : RELEASES_URL;
+if (IS_BETA) app.setName('Fortochka Beta');
 
 const IS_SMOKE = process.argv.includes('--smoke');
 const IS_DIRECT = process.argv.includes('--direct'); // без прокси-цепочки, wss напрямую (для отладки)
@@ -45,7 +50,9 @@ const TGWS_EXE = path.join(APP_DIR, 'vendor', IS_MAC ? 'tg-ws-proxy-macos' : 'tg
 // FORTOCHKA_USER_DATA — отдельный профиль для тестов (смоук параллельно
 // с работающим приложением: свой лок и свои порты в config.json).
 const USER_DATA = process.env.FORTOCHKA_USER_DATA
-  || netcore.migrateProfile(app.getPath('appData'));
+  || (IS_BETA
+    ? path.join(app.getPath('appData'), 'fortochka-beta')
+    : netcore.migrateProfile(app.getPath('appData')));
 app.setPath('userData', USER_DATA);
 
 // Один экземпляр: повторный клик по ярлыку не поднимает вторую копию
@@ -441,16 +448,16 @@ async function handleFortochka(req, res) {
             : 'У вас актуальная версия (' + app.getVersion() + ').',
           latest: result.version,
           source: result.source,
-          url: RELEASES_URL
+          url: UPDATE_RELEASES_URL
         });
       } catch (e) {
         sendJson(res, 200, {
           message: 'Не удалось проверить обновления: ' + (e.message || e),
-          url: RELEASES_URL
+          url: UPDATE_RELEASES_URL
         });
       }
     } else if (ep === 'openreleases' && req.method === 'POST') {
-      shell.openExternal(RELEASES_URL).catch((e) => log('[updates] browser: ' + e.message));
+      shell.openExternal(UPDATE_RELEASES_URL).catch((e) => log('[updates] browser: ' + e.message));
       sendJson(res, 200, {});
     } else if (ep === 'openlog' && req.method === 'POST') {
       shell.showItemInFolder(tgwsLogPath()); sendJson(res, 200, {});
@@ -775,12 +782,12 @@ function setupMacMenu() {
 function createTray() {
   if (IS_SMOKE) return;
   tray = new Tray(trayIcon());
-  tray.setToolTip('Fortochka — Telegram Web');
+  tray.setToolTip(IS_BETA ? 'Fortochka Beta — экспериментальная сборка' : 'Fortochka — Telegram Web');
   const menu = [
     { label: 'Открыть', click: showWindow },
     { label: 'Диагностика', click: openDiagWindow },
     { label: 'Проверить обновления', click: () => manualUpdateCheck() },
-    { label: 'Открыть страницу релизов', click: () => shell.openExternal(RELEASES_URL).catch(() => {}) },
+    { label: 'Открыть страницу релизов', click: () => shell.openExternal(UPDATE_RELEASES_URL).catch(() => {}) },
     { label: 'Автозапуск', type: 'checkbox', checked: app.getLoginItemSettings().openAtLogin,
       click: (mi) => app.setLoginItemSettings({
         openAtLogin: mi.checked, path: process.execPath,
@@ -816,7 +823,7 @@ app.on('open-url', (event, url) => {
 });
 
 function registerProtocol() {
-  if (!app.isPackaged) return; // в dev схему не трогаем
+  if (IS_BETA || !app.isPackaged) return; // Beta не перехватывает tg:// у стабильной Fortochka
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
     // portable-сборка мимо инсталлятора — регистрируем на ходу
     app.setAsDefaultProtocolClient('tg');
@@ -833,7 +840,7 @@ async function checkForUpdates(notify = false) {
   updateStatusText = 'проверяется...';
   updateCheckPending = (async () => {
     // GitHub Releases API не требует latest.yml. При недоступности API используем CDN.
-    const { version, source } = await getLatestVersion();
+    const { version, source } = await getLatestVersion(fetch, IS_BETA ? 'beta' : 'stable');
     const available = compareVersions(version, app.getVersion()) > 0;
     updateStatusText = available
       ? 'доступно ' + version + ' — установка вручную'
@@ -844,7 +851,7 @@ async function checkForUpdates(notify = false) {
         title: 'Fortochka',
         body: 'Доступна версия ' + version + '. Откройте релизы для ручного обновления.'
       });
-      notice.on('click', () => shell.openExternal(RELEASES_URL).catch(() => {}));
+      notice.on('click', () => shell.openExternal(UPDATE_RELEASES_URL).catch(() => {}));
       notice.show();
     }
     return { version, source, available };
