@@ -52,7 +52,7 @@ answers 404.
 
 From [Releases](../../releases):
 
-- `fortochka-setup-<version>.exe` — installer (Program Files), auto-updates
+- `fortochka-setup-<version>.exe` — installer (Program Files); reports available updates, install manually
 - `fortochka-portable-<version>.exe` — single file, no installation
 
 ### macOS
@@ -76,7 +76,7 @@ that works too, no Terminal needed. On macOS 13 and older: right-click the app �
 Step-by-step guide (in Russian, covers all macOS versions):
 [docs/install-macos.md](docs/install-macos.md).
 
-macOS builds do not auto-update: the app reports a new version (tray → check for
+Automatic installation is disabled on both platforms until release signing is verifiable. On macOS: the app reports a new version (tray → check for
 updates), the DMG you download yourself.
 
 On both platforms: closing the window hides it; the tray/menubar icon has open,
@@ -92,6 +92,7 @@ fronts, check for updates, open engine log / profile folder.
 
 ```
 npm run smoke    # headless check: statics + service worker + fronts endpoint + wss + SOCKS bridge
+npm test         # regression tests for netcore and worker patcher (no Electron required)
 ```
 
 ## Configuration
