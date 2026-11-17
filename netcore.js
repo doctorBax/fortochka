@@ -148,6 +148,7 @@ class FrontManager {
     this.health = new Map();  // host -> { alive, ms, checkedAt, failStreak }
     this.probing = null;
     this.updateTimer = null;
+    this.probeTimer = null;
   }
 
   start() {
@@ -164,10 +165,14 @@ class FrontManager {
     // фронт не переротирует — застревает навсегда (симптом: аватарки в блюре,
     // медиа-задачи висят без ошибки). serveFrontsScript дожидается этой пробы.
     this.probesDone = false;
-    this.probeAll(2500).then(() => { this.probesDone = true; this.log('[fronts] первая проба готова'); });
+    this.probeAll(2500).catch((e) => this.log('[fronts] начальная проверка: ' + e.message))
+      .finally(() => { this.probesDone = true; this.log('[fronts] первая проба завершена'); });
   }
 
-  stop() { if (this.updateTimer) clearInterval(this.updateTimer); }
+  stop() {
+    if (this.updateTimer) clearInterval(this.updateTimer);
+    if (this.probeTimer) clearInterval(this.probeTimer);
+  }
 
   async refreshFromRepo() {
     for (const url of FRONT_LIST_URLS) {
@@ -184,6 +189,10 @@ class FrontManager {
             JSON.stringify(this.fetched, null, 2));
         } catch {}
         this.log('[fronts] обновлено из репо (' + url + '): ' + domains.length + ' доменов');
+        // Обновлённые фронты проверяем сразу, даже если предыдущая проба ещё идёт.
+        const previousProbe = this.probing;
+        (previousProbe ? previousProbe.catch(() => {}) : Promise.resolve())
+          .then(() => this.probeAll().catch(() => {}));
         return;
       } catch (e) {
         // сеть может быть блокирована до коннекта — переходим к следующему зеркалу
@@ -264,7 +273,7 @@ class FrontManager {
       const prev = this.health.get(host);
       // фронты маршрутизируют только kws{dc}-сабдомены: базовый домен на /apiws
       // не отвечает, поэтому probe бьёт в kws2.<фронт> (иначе все «мёртвые»)
-      const probeTarget = host === 'web.telegram.org' || /^kws/.test(host) ? host : 'kws2.' + host;
+      const probeTarget = /^kws\d/.test(host) ? host : 'kws2.' + host;
       const r = await this.probeHost(probeTarget, timeoutMs);
       const failStreak = r.alive ? 0 : ((prev && prev.failStreak || 0) + 1);
       const entry = { alive: r.alive, ms: r.ms, checkedAt: Date.now(), failStreak };
@@ -276,8 +285,8 @@ class FrontManager {
 
   startPeriodicProbes(everyMs = 5 * 60 * 1000) {
     this.probeAll().catch(() => {});
-    const t = setInterval(() => this.probeAll().catch(() => {}), everyMs);
-    t.unref && t.unref();
+    this.probeTimer = setInterval(() => this.probeAll().catch(() => {}), everyMs);
+    this.probeTimer.unref && this.probeTimer.unref();
   }
 
   // /fortochka/fronts.js — importScripts() из webk-воркера (синхронный).
@@ -294,7 +303,7 @@ class FrontManager {
       const { domains: ranked, source } = this.rankedList();
       const domains = ranked.filter((d) => {
         const h = this.health.get(d);
-        return !(h && h.alive === false);
+        return !(h && h.alive === false && h.failStreak >= 2);
       });
       const body = 'self.__fortochkaFronts=' + JSON.stringify(domains)
         + ';self.__fortochkaFrontsMeta=' + JSON.stringify({ source, at: Date.now() }) + ';';
@@ -330,7 +339,8 @@ function buildDnsQuery(name) {
 
 function parseDnsA(buf) {
   try {
-    if ((buf.readUInt16BE(2) & 0x000F) !== 0) return []; // rcode != 0
+    if (buf.length < 12) return [];
+    if (!(buf.readUInt16BE(2) & 0x8000) || (buf.readUInt16BE(2) & 0x000F) !== 0) return [];
     const qd = buf.readUInt16BE(4), an = buf.readUInt16BE(6);
     let off = 12;
     const skipName = () => {
@@ -349,6 +359,7 @@ function parseDnsA(buf) {
       off += 2; // class
       off += 4; // ttl
       const rdlen = buf.readUInt16BE(off); off += 2;
+      if (off + rdlen > buf.length) return [];
       if (type === 1 && rdlen === 4) {
         ips.push([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]].join('.'));
       }
@@ -366,6 +377,7 @@ class DohResolver {
     this.log = log || (() => {});
     this.cache = new Map(); // host -> { ips, until }
     this.workingUrl = null; // первый сработавший — использую его первым
+    this.inflight = new Map(); // запросы одного домена делят DNS lookup
   }
 
   urls() {
@@ -379,15 +391,25 @@ class DohResolver {
     if (!this.config.doh || this.config.doh.enabled === false) return null;
     const hit = this.cache.get(host);
     if (hit && hit.until > Date.now()) return hit.ips;
-    for (const u of this.urls()) {
-      const ips = await this.queryOne(u, host);
-      if (ips && ips.length) {
-        this.workingUrl = u;
-        this.cache.set(host, { ips, until: Date.now() + 10 * 60 * 1000 });
-        return ips;
+    if (this.inflight.has(host)) return this.inflight.get(host);
+    const pending = (async () => {
+      const attempts = this.urls().map((url) => this.queryOne(url, host).then((ips) => {
+        if (!ips || !ips.length) throw new Error('no DNS answers');
+        return { url, ips };
+      }));
+      const winner = await Promise.any(attempts).catch(() => null);
+      if (winner) {
+        this.workingUrl = winner.url;
+        this.cache.set(host, { ips: winner.ips, until: Date.now() + 10 * 60 * 1000 });
+        return winner.ips;
       }
-    }
-    return null; // фолбэк — системный DNS в CONNECT-шимме
+      // Убираем повторные серии сетевых таймаутов при каждом CONNECT.
+      this.cache.set(host, { ips: null, until: Date.now() + 10000 });
+      return null;
+    })();
+    this.inflight.set(host, pending);
+    try { return await pending; }
+    finally { this.inflight.delete(host); }
   }
 
   // Google/Cloudflare отвечают JSON на GET; AdGuard/Comss понимают только
@@ -397,7 +419,7 @@ class DohResolver {
       const sep = u.includes('?') ? '&' : '?';
       const res = await fetch(u + sep + 'name=' + encodeURIComponent(host) + '&type=A', {
         headers: { accept: 'application/dns-json' },
-        signal: AbortSignal.timeout(4000)
+        signal: AbortSignal.timeout(2000)
       });
       if (res.ok && String(res.headers.get('content-type') || '').includes('json')) {
         const j = await res.json();
@@ -413,7 +435,7 @@ class DohResolver {
         method: 'POST',
         headers: { 'content-type': 'application/dns-message' },
         body: buildDnsQuery(host),
-        signal: AbortSignal.timeout(4000)
+        signal: AbortSignal.timeout(2000)
       });
       if (!res.ok) return null;
       return parseDnsA(Buffer.from(await res.arrayBuffer()));
@@ -463,6 +485,7 @@ class Allowlist {
 
 module.exports = {
   APP_NAME, DEFAULT_FRONTS, DEFAULT_CONFIG, FRONT_LIST_URLS,
+  buildDnsQuery, parseDnsA,
   migrateProfile, setupProfile, loadState, saveState,
   FrontManager, DohResolver, Allowlist
 };
