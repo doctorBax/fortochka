@@ -16,7 +16,6 @@
 const { app, BrowserWindow, Tray, Menu, session, nativeImage, Notification, powerSaveBlocker, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const fsp = require('fs/promises');
 const net = require('net');
 const http = require('http');
 const crypto = require('crypto');
@@ -374,6 +373,21 @@ function sendJson(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function memorySnapshot() {
+  // Electron process metrics are reported in KiB; excludes the Rust tg-ws-proxy child.
+  const processes = app.getAppMetrics();
+  const sum = (key) => processes.reduce((total, proc) => total +
+    (Number.isFinite(proc.memory && proc.memory[key]) ? proc.memory[key] : 0), 0);
+  const toMiB = (kib) => Math.round(kib / 1024);
+  const hasPrivate = processes.some((proc) => Number.isFinite(proc.memory && proc.memory.privateBytes));
+  return {
+    processes: processes.length,
+    workingSetMB: toMiB(sum('workingSetSize')),
+    privateMB: hasPrivate ? toMiB(sum('privateBytes')) : null,
+    mainHeapMB: Math.round(process.memoryUsage().heapUsed / (1024 * 1024))
+  };
+}
+
 function updaterStatusText() {
   return updateStatusText || 'ещё не проверялись';
 }
@@ -402,6 +416,7 @@ async function handleFortochka(req, res) {
         profile: USER_DATA,
         log: tgwsLogPath(),
         updater: updaterStatusText(),
+        memory: memorySnapshot(),
         blocked: allowlist.blocked.map((b) => b.host)
       });
     } else if (ep === 'probe' && req.method === 'POST') {
