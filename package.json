@@ -14,7 +14,7 @@
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
-    "test": "node --test tests/netcore.test.js tests/worker-patch.test.js",
+    "test": "node --test tests/netcore.test.js tests/worker-patch.test.js tests/updatecheck.test.js tests/staticserve.test.js",
     "patch-webapp": "node tools/patch-worker-fronts.js",
     "dist": "electron-builder --win nsis portable",
     "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx",
