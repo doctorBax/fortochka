@@ -24,5 +24,7 @@ jobs:
           node --check main.js
           node --check netcore.js
           node --check tools/patch-worker-fronts.js
+          node --check updatecheck.js
+          node --check staticserve.js
       - name: Run regression tests
         run: npm test
