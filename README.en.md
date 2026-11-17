@@ -95,6 +95,20 @@ npm run smoke    # headless check: statics + service worker + fronts endpoint + 
 npm test         # regression tests for netcore and worker patcher (no Electron required)
 ```
 
+## Windows notes: updates, links, memory
+
+- **Update checks:** query the GitHub Releases API, then fall back to the jsDelivr
+  mirror of the version in `main/package.json`. The `latest.yml` artifact is no
+  longer required to check versions. Portable editions can check updates too.
+  Installation is manual until releases are signed and verified.
+- **External links:** HTTP/HTTPS URLs open in the system's default browser rather
+  than creating blank Electron child windows.
+- **Memory:** bundled assets stream from disk and support byte ranges for media.
+  Diagnostics display Electron process count, working-set RAM, Windows private
+  bytes and the main JS heap. The standalone `tg-ws-proxy` child is excluded.
+  Telegram Web K's Chromium renderer still holds media and chat state, so its
+  footprint varies with usage.
+
 ## Configuration
 
 Profile lives in `%APPDATA%/fortochka/` on Windows, `~/Library/Application Support/fortochka/`
