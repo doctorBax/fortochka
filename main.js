@@ -219,22 +219,48 @@ function startTgws() {
 function socksConnect(ipStr, port, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const s = net.connect({ host: '127.0.0.1', port: SOCKS_PORT });
-    let stage = 0;
-    const fail = (msg) => { s.destroy(); reject(new Error(msg)); };
+    const ip = ipStr.split('.').map(Number);
+    let stage = 0, settled = false, buffer = Buffer.alloc(0);
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      s.destroy();
+      reject(new Error(message));
+    };
+    if (ip.length !== 4 || ip.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      fail('invalid SOCKS destination IPv4');
+      return;
+    }
     s.setTimeout(timeoutMs, () => fail('socks timeout'));
     s.on('error', (e) => fail('socks: ' + e.message));
     s.on('connect', () => s.write(Buffer.from([5, 1, 0])));
-    s.on('data', (d) => {
+    const onData = (data) => {
+      if (settled) return;
+      buffer = Buffer.concat([buffer, data]);
       if (stage === 0) {
-        if (d.length < 2 || d[0] !== 5 || d[1] !== 0) return fail('socks greeting: ' + d.toString('hex'));
+        if (buffer.length < 2) return;
+        if (buffer[0] !== 5 || buffer[1] !== 0) return fail('socks greeting: ' + buffer.toString('hex'));
+        buffer = buffer.subarray(2);
         stage = 1;
-        const ip = ipStr.split('.').map(Number);
-        s.write(Buffer.from([5, 1, 0, 1, ip[0], ip[1], ip[2], ip[3], port >> 8, port & 255]));
-      } else {
-        if (d.length > 1 && d[1] === 0) { s.setTimeout(0); resolve(s); }
-        else fail('socks reply code=' + (d[1] ?? '?'));
+        s.write(Buffer.from([5, 1, 0, 1, ...ip, port >> 8, port & 255]));
       }
-    });
+      if (stage === 1 && buffer.length >= 4) {
+        if (buffer[0] !== 5 || buffer[2] !== 0) return fail('invalid SOCKS reply');
+        const atyp = buffer[3];
+        if (atyp !== 1 && atyp !== 3 && atyp !== 4) return fail('invalid SOCKS address type');
+        if (atyp === 3 && buffer.length < 5) return;
+        const addressSize = atyp === 1 ? 4 : atyp === 4 ? 16 : 1 + buffer[4];
+        const replySize = 4 + addressSize + 2;
+        if (buffer.length < replySize) return;
+        if (buffer[1] !== 0) return fail('socks reply code=' + buffer[1]);
+        settled = true;
+        s.removeListener('data', onData);
+        s.setTimeout(0);
+        if (buffer.length > replySize) s.unshift(buffer.subarray(replySize));
+        resolve(s);
+      }
+    };
+    s.on('data', onData);
   });
 }
 
