@@ -1,0 +1,121 @@
+name: beta-release
+
+# Each push to beta builds prerelease binaries without requiring test approval.
+# Neither main nor stable releases are modified. Publishing waits for both builds.
+on:
+  push:
+    branches: [beta]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fortochka-beta
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows Beta (NSIS + portable)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Make isolated Beta package metadata
+        run: node tools/prepare-beta.js
+      - name: Package Windows Beta
+        run: npm run dist -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-windows
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/fortochka-beta-setup-*.exe
+            release/fortochka-beta-portable-*.exe
+
+  macos:
+    name: macOS Beta (universal DMG + ZIP)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Make isolated Beta package metadata
+        run: node tools/prepare-beta.js
+      - name: Package macOS Beta
+        run: npm run dist:mac -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Upload macOS installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-macos
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/fortochka-beta-mac-*.dmg
+            release/fortochka-beta-mac-*.zip
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Windows and macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: beta-*
+          merge-multiple: true
+          path: artifacts
+      - name: Validate artifacts and create SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find artifacts -maxdepth 1 -name 'fortochka-beta-setup-*.exe' -print -quit)"
+          test -n "$(find artifacts -maxdepth 1 -name 'fortochka-beta-portable-*.exe' -print -quit)"
+          test -n "$(find artifacts -maxdepth 1 -name 'fortochka-beta-mac-*.dmg' -print -quit)"
+          test -n "$(find artifacts -maxdepth 1 -name 'fortochka-beta-mac-*.zip' -print -quit)"
+          (cd artifacts && sha256sum fortochka-beta-* > SHA256SUMS.txt)
+      - name: Publish experimental prerelease (NOT latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=$(node -p "require('./package.json').version")
+          NEXT=$(printf '%s' "$BASE" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
+          TAG="v${NEXT}-beta.${GITHUB_RUN_NUMBER}"
+          printf '%s\n' \
+            "## Fortochka Beta - экспериментальная сборка" \
+            "" \
+            "Автоматически собрана из ветки beta. **Не проверена вручную**. Возможны ошибки и потеря данных в бета-профиле." \
+            "" \
+            "- Стабильная Fortochka не изменяется и устанавливается отдельно." \
+            "- Beta хранит данные в собственном профиле fortochka-beta." \
+            "- Автоматическая установка обновлений отключена." \
+            "- Commit: ${GITHUB_SHA}" > beta-notes.md
+          gh release create "$TAG" artifacts/* \
+            --target "$GITHUB_SHA" \
+            --title "Fortochka $TAG (EXPERIMENTAL)" \
+            --notes-file beta-notes.md \
+            --prerelease \
+            --latest=false
