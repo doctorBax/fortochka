@@ -942,6 +942,7 @@ app.whenReady().then(async () => {
     // окно уже открыто, а движок доедет (webk сам переподключается)
     createWindow();
     trace('window created');
+    registerProtocol();
     startTgws();
     trace('tgws spawned');
     setupMacMenu();
