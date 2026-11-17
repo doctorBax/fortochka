@@ -173,6 +173,7 @@ process.on('unhandledRejection', (reason) => logRuntimeError('unhandled-rejectio
 
 // ---------- tg-ws-proxy-rs как child process ----------
 let tgwsProc = null;
+let tgwsRunning = false;
 let tgwsFailures = 0;
 let tgwsRestarting = false;
 let quitting = false;
@@ -200,11 +201,18 @@ function startTgws() {
   }
   if (!IS_DIRECT) args.push('--no-outbound-proxy'); // не подхватывать случайные HTTP(S)_PROXY
   tgwsProc = spawn(TGWS_EXE, args, { windowsHide: true, stdio: ['ignore', fd, fd] });
-  tgwsProc.on('exit', (code) => scheduleTgwsRestart(fd, `процесс вышел (code=${code})`));
+  tgwsProc.on('exit', (code) => { tgwsRunning = false; scheduleTgwsRestart(fd, 'процесс вышел (code=' + code + ')'); });
   // без обработчика 'error' неудачный спавн (нет прав/файла) крешит main
   // молча — окно вообще не откроется. Лог + перезапуск по бэкоффу.
-  tgwsProc.on('error', (e) => scheduleTgwsRestart(fd, 'spawn error: ' + (e && e.message || e)));
-  tgwsProc.on('spawn', () => { tgwsFailures = 0; });
+  tgwsProc.on('error', (e) => { tgwsRunning = false; scheduleTgwsRestart(fd, 'spawn error: ' + (e && e.message || e)); });
+  tgwsProc.on('spawn', () => {
+    tgwsRunning = true;
+    const proc = tgwsProc;
+    const t = setTimeout(() => {
+      if (tgwsRunning && tgwsProc === proc) tgwsFailures = 0;
+    }, 60000);
+    t.unref();
+  });
 }
 
 // ---------- SOCKS5-клиент (до tg-ws-proxy) ----------
@@ -279,7 +287,10 @@ async function serveStatic(req, res) {
   let rel = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (rel === '/' || rel === '') rel = '/index.html';
   const file = path.normalize(path.join(WEBAPP_DIR, rel));
-  if (!file.startsWith(WEBAPP_DIR)) { res.writeHead(403).end(); return; }
+  const relative = path.relative(WEBAPP_DIR, file);
+  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+    res.writeHead(403).end(); return;
+  }
   try {
     const data = await fsp.readFile(file);
     const headers = {
@@ -306,7 +317,7 @@ function pipe(a, b) {
 function onConnect(req, clientSocket, head) {
   const [host, portStr] = req.url.split(':');
   const port = +portStr || 443;
-  if (!allowlist.allows(host)) {
+  if (port !== 443 || !allowlist.allows(host)) {
     log('[connect] заблокирован allowlist-ом: ' + host);
     clientSocket.destroy();
     return;
@@ -349,7 +360,7 @@ function updaterStatusText() {
 }
 
 // подсказка «что делать с найденным обновлением» — зависит от платформы
-const updateHint = () => IS_MAC ? ' — скачайте новый DMG с GitHub.' : ' — скачается и установится при выходе.';
+const updateHint = () => ' — скачайте установщик вручную с GitHub Releases.';
 
 async function handleFortochka(req, res) {
   const url = new URL(req.url, 'http://x');
@@ -367,7 +378,7 @@ async function handleFortochka(req, res) {
       sendJson(res, 200, {
         version: app.getVersion(),
         fronts: frontManager.diag(),
-        tgws: { running: !!tgwsProc && !tgwsProc.killed, pid: tgwsProc && tgwsProc.pid },
+        tgws: { running: tgwsRunning, pid: tgwsProc && tgwsProc.pid },
         doh: !(config.doh && config.doh.enabled === false),
         profile: USER_DATA,
         log: tgwsLogPath(),
@@ -383,7 +394,7 @@ async function handleFortochka(req, res) {
         try {
           const r = await autoUpdater.checkForUpdates();
           const v = r && r.updateInfo && r.updateInfo.version;
-          updateStatusText = v && v !== app.getVersion() ? 'доступно ' + v + ' — скачается само' : 'актуальная версия';
+          updateStatusText = v && v !== app.getVersion() ? 'доступно ' + v + ' — установка вручную' : 'актуальная версия';
           sendJson(res, 200, { message: v && v !== app.getVersion() ? 'Доступна версия ' + v + updateHint() : 'У вас актуальная версия (' + app.getVersion() + ').', latest: v });
         } catch (e) {
           updateStatusText = 'ошибка проверки';
@@ -424,31 +435,43 @@ function openDiagWindow() {
 }
 
 function startWebServer() {
-  const server = http.createServer((req, res) => {
-    Promise.resolve(handleFortochka(req, res))
-      .then((handled) => { if (!handled) return serveStatic(req, res); })
-      .catch(() => { try { res.writeHead(500).end(); } catch {} });
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      Promise.resolve(handleFortochka(req, res))
+        .then((handled) => { if (!handled) return serveStatic(req, res); })
+        .catch(() => { try { res.writeHead(500).end(); } catch {} });
+    });
+    server.on('connect', onConnect);
+    server.once('error', (e) => {
+      log('[web-server] не смог подняться на ' + WEB_PORT + ': ' + e.message);
+      reject(e);
+    });
+    server.listen(WEB_PORT, '127.0.0.1', () => resolve(server));
   });
-  server.on('connect', onConnect);
-  server.listen(WEB_PORT, '127.0.0.1');
-  // без обработчика EADDRINUSE Electron показывает красный диалог — гасим тихо
-  server.on('error', (e) => {
-    log('[web-server] не смог подняться на ' + WEB_PORT + ': ' + e.message);
-  });
-  return server;
 }
 
-// ---------- разрешения (уведомления, камера/микрофон для звонков) ----------
+// ---------- разрешения// ---------- разрешения (уведомления, камера/микрофон для звонков) ----------
 const ALLOWED = new Set(['media', 'audioCapture', 'videoCapture', 'notifications',
   'clipboard-read', 'clipboard-sanitized-write', 'fullscreen', 'display-capture', 'pointerLock']);
 
-function configureSession() {
+async function configureSession() {
   const ses = session.defaultSession;
-  ses.setPermissionRequestHandler((wc, permission, cb) => cb(ALLOWED.has(permission)));
-  ses.setPermissionCheckHandler((wc, permission) => ALLOWED.has(permission));
+  const ownOrigin = 'http://127.0.0.1:' + WEB_PORT;
+  const local = (value) => {
+    try { return new URL(value).origin === ownOrigin; } catch { return false; }
+  };
+  const ownedWindow = (wc) => !!wc && (
+    (win && !win.isDestroyed() && wc.id === win.webContents.id) ||
+    (diagWin && !diagWin.isDestroyed() && wc.id === diagWin.webContents.id)
+  );
+  ses.setPermissionRequestHandler((wc, permission, cb, details = {}) => {
+    cb(ownedWindow(wc) && ALLOWED.has(permission) && local(details.securityOrigin || details.requestingUrl));
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details = {}) => {
+    return ownedWindow(wc) && ALLOWED.has(permission) && local(details.securityOrigin || requestingOrigin);
+  });
   if (!IS_DIRECT) {
-    // весь внешний трафик (включая wss) — через наш CONNECT-шимм
-    ses.setProxy({ proxyRules: `http://127.0.0.1:${WEB_PORT}`, proxyBypassRules: '<local>' });
+    await ses.setProxy({ proxyRules: 'http://127.0.0.1:' + WEB_PORT, proxyBypassRules: '<local>' });
   }
 }
 
@@ -553,6 +576,20 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false
     }
+  });
+
+  const openOutside = (url) => {
+    if (/^tg:/i.test(url)) { handleTgLink(url); return; }
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openOutside(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('http://127.0.0.1:' + WEB_PORT + '/')) return;
+    event.preventDefault();
+    openOutside(url);
   });
 
   win.webContents.on('before-input-event', (e, input) => {
@@ -721,6 +758,11 @@ function handleTgLink(url) {
   ).catch(() => {});
 }
 
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleTgLink(url);
+});
+
 function registerProtocol() {
   if (!app.isPackaged) return; // в dev схему не трогаем
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
@@ -734,26 +776,32 @@ let autoUpdater = null;
 let updateStatusText = '';
 
 function setupUpdater() {
-  // portable не умеет самообновляться — только напоминание на странице диагностики
   if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_DIR) return;
   let au;
   try { au = require('electron-updater').autoUpdater; } catch { return; }
   autoUpdater = au;
-  // самоподписанный серт: стандартная проверка подписи обновления не пройдёт
-  autoUpdater.verifyUpdateCodeSignature = async () => null;
-  // mac: подпись ad-hoc — автоматическую замену .app не включаем, только сообщаем
-  autoUpdater.autoDownload = !IS_MAC;
-  autoUpdater.on('update-downloaded', (info) => {
-    updateStatusText = 'скачано ' + info.version + ' — установится при выходе';
+  // Неподписанные установщики: до внедрения доверенной подписи только проверка,
+  // без автоматической загрузки или установки исполняемых файлов.
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  let lastNotifiedVersion = null;
+  autoUpdater.on('update-available', (info) => {
+    updateStatusText = 'доступно ' + info.version + ' — установка вручную';
+    if (lastNotifiedVersion === info.version) return;
+    lastNotifiedVersion = info.version;
     if (Notification.isSupported()) {
-      new Notification({
+      const notice = new Notification({
         title: 'Fortochka',
-        body: `Обновление ${info.version} скачано — установится при выходе из приложения.`
-      }).show();
+        body: 'Доступна версия ' + info.version + '. Скачайте её с GitHub Releases.'
+      });
+      notice.on('click', () => shell.openExternal('https://github.com/doctorBax/fortochka/releases/latest'));
+      notice.show();
     }
   });
-  autoUpdater.on('error', () => {});
-  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000);
+  autoUpdater.on('error', (e) => {
+    updateStatusText = 'ошибка проверки: ' + (e.message || e);
+  });
+  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000).unref();
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 3600 * 1000).unref();
 }
 
@@ -779,10 +827,11 @@ function manualUpdateCheck() {
 }
 
 // ---------- smoke-тест ----------
+let smokeStarted = false;
 let smokeDone = false;
 async function runSmokeChecks() {
-  if (!IS_SMOKE || smokeDone) return;
-  smokeDone = true;
+  if (!IS_SMOKE || smokeStarted) return;
+  smokeStarted = true;
   const out = { webapp: null, sw: null, fronts: null, wss: null, socks: null };
   try {
     out.webapp = await win.webContents.executeJavaScript(
@@ -840,6 +889,7 @@ async function runSmokeChecks() {
     && out.sw && out.sw.count > 0
     && out.fronts && out.fronts.ok
     && out.wss === 'open' && out.socks && out.socks.ok;
+  smokeDone = true;
   console.log(ok ? 'SMOKE_OK ' + JSON.stringify(out) : 'SMOKE_FAIL ' + JSON.stringify(out));
   quitting = true;
   app.exit(ok ? 0 : 1);
@@ -857,10 +907,10 @@ app.on('activate', () => { if (!IS_SMOKE) showWindow(); });
 
 app.whenReady().then(async () => {
   try {
-    configureSession();
-    trace('session ok');
     await chooseServicePorts();
-    startWebServer();
+    await configureSession();
+    trace('session ok');
+    await startWebServer();
     trace('web server ok');
     // окно раньше движка: что бы ни случилось со спавном бинарника,
     // окно уже открыто, а движок доедет (webk сам переподключается)
