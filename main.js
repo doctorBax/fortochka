@@ -23,6 +23,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const netcore = require('./netcore');
+const { serveStaticFile } = require('./staticserve');
+const { RELEASES_URL, getLatestVersion, compareVersions } = require('./updatecheck');
 const DIAG_PAGE = require('./diagpage');
 
 const IS_SMOKE = process.argv.includes('--smoke');
@@ -309,26 +311,18 @@ function cacheControlFor(file) {
   return 'no-cache';
 }
 
-async function serveStatic(req, res) {
-  let rel = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  if (rel === '/' || rel === '') rel = '/index.html';
-  const file = path.normalize(path.join(WEBAPP_DIR, rel));
-  const relative = path.relative(WEBAPP_DIR, file);
-  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
-    res.writeHead(403).end(); return;
-  }
-  try {
-    const data = await fsp.readFile(file);
-    const headers = {
-      'content-type': contentType(file),
-      'cache-control': cacheControlFor(file)
-    };
-    if (!process.env.FORTOCHKA_NO_CSP) headers['content-security-policy'] = CSP; // отладка CSP
-    res.writeHead(200, headers);
-    res.end(data);
-  } catch {
-    res.writeHead(404).end('not found');
-  }
+function serveStatic(req, res) {
+  return serveStaticFile(req, res, {
+    root: WEBAPP_DIR,
+    headersFor: (file) => {
+      const headers = {
+        'content-type': contentType(file),
+        'cache-control': cacheControlFor(file)
+      };
+      if (!process.env.FORTOCHKA_NO_CSP) headers['content-security-policy'] = CSP;
+      return headers;
+    }
+  });
 }
 
 function pipe(a, b) {
@@ -381,8 +375,7 @@ function sendJson(res, code, obj) {
 }
 
 function updaterStatusText() {
-  if (!autoUpdater) return 'недоступны (dev или portable — обновляйтесь с GitHub)';
-  return updateStatusText || 'проверяется...';
+  return updateStatusText || 'ещё не проверялись';
 }
 
 // подсказка «что делать с найденным обновлением» — зависит от платформы
@@ -414,19 +407,25 @@ async function handleFortochka(req, res) {
     } else if (ep === 'probe' && req.method === 'POST') {
       sendJson(res, 200, { fronts: frontManager.diag(), health: await frontManager.probeAll() });
     } else if (ep === 'upcheck' && req.method === 'POST') {
-      if (!autoUpdater) { sendJson(res, 200, { message: 'Обновления недоступны в этом режиме — скачайте с GitHub.' }); }
-      else {
-        updateStatusText = 'проверяется...';
-        try {
-          const r = await autoUpdater.checkForUpdates();
-          const v = r && r.updateInfo && r.updateInfo.version;
-          updateStatusText = v && v !== app.getVersion() ? 'доступно ' + v + ' — установка вручную' : 'актуальная версия';
-          sendJson(res, 200, { message: v && v !== app.getVersion() ? 'Доступна версия ' + v + updateHint() : 'У вас актуальная версия (' + app.getVersion() + ').', latest: v });
-        } catch (e) {
-          updateStatusText = 'ошибка проверки';
-          sendJson(res, 200, { message: 'Не удалось проверить: ' + (e.message || e) });
-        }
+      try {
+        const result = await checkForUpdates(false);
+        sendJson(res, 200, {
+          message: result.available
+            ? 'Доступна версия ' + result.version + updateHint()
+            : 'У вас актуальная версия (' + app.getVersion() + ').',
+          latest: result.version,
+          source: result.source,
+          url: RELEASES_URL
+        });
+      } catch (e) {
+        sendJson(res, 200, {
+          message: 'Не удалось проверить обновления: ' + (e.message || e),
+          url: RELEASES_URL
+        });
       }
+    } else if (ep === 'openreleases' && req.method === 'POST') {
+      shell.openExternal(RELEASES_URL).catch((e) => log('[updates] browser: ' + e.message));
+      sendJson(res, 200, {});
     } else if (ep === 'openlog' && req.method === 'POST') {
       shell.showItemInFolder(tgwsLogPath()); sendJson(res, 200, {});
     } else if (ep === 'openprofile' && req.method === 'POST') {
@@ -755,6 +754,7 @@ function createTray() {
     { label: 'Открыть', click: showWindow },
     { label: 'Диагностика', click: openDiagWindow },
     { label: 'Проверить обновления', click: () => manualUpdateCheck() },
+    { label: 'Открыть страницу релизов', click: () => shell.openExternal(RELEASES_URL).catch(() => {}) },
     { label: 'Автозапуск', type: 'checkbox', checked: app.getLoginItemSettings().openAtLogin,
       click: (mi) => app.setLoginItemSettings({
         openAtLogin: mi.checked, path: process.execPath,
@@ -797,59 +797,56 @@ function registerProtocol() {
   }
 }
 
-// ---------- автообновление (GitHub Releases) ----------
-let autoUpdater = null;
+// ---------- проверка наличия обновлений (без загрузки исполняемых файлов) ----------
 let updateStatusText = '';
+let updateCheckPending = null;
+let lastNotifiedVersion = '';
 
-function setupUpdater() {
-  if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_DIR) return;
-  let au;
-  try { au = require('electron-updater').autoUpdater; } catch { return; }
-  autoUpdater = au;
-  // Неподписанные установщики: до внедрения доверенной подписи только проверка,
-  // без автоматической загрузки или установки исполняемых файлов.
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
-  let lastNotifiedVersion = null;
-  autoUpdater.on('update-available', (info) => {
-    updateStatusText = 'доступно ' + info.version + ' — установка вручную';
-    if (lastNotifiedVersion === info.version) return;
-    lastNotifiedVersion = info.version;
-    if (Notification.isSupported()) {
+async function checkForUpdates(notify = false) {
+  if (updateCheckPending) return updateCheckPending;
+  updateStatusText = 'проверяется...';
+  updateCheckPending = (async () => {
+    // GitHub Releases API не требует latest.yml. При недоступности API используем CDN.
+    const { version, source } = await getLatestVersion();
+    const available = compareVersions(version, app.getVersion()) > 0;
+    updateStatusText = available
+      ? 'доступно ' + version + ' — установка вручную'
+      : 'актуальная версия (' + app.getVersion() + ')';
+    if (notify && available && version !== lastNotifiedVersion && Notification.isSupported()) {
+      lastNotifiedVersion = version;
       const notice = new Notification({
         title: 'Fortochka',
-        body: 'Доступна версия ' + info.version + '. Скачайте её с GitHub Releases.'
+        body: 'Доступна версия ' + version + '. Откройте релизы для ручного обновления.'
       });
-      notice.on('click', () => shell.openExternal('https://github.com/doctorBax/fortochka/releases/latest'));
+      notice.on('click', () => shell.openExternal(RELEASES_URL).catch(() => {}));
       notice.show();
     }
-  });
-  autoUpdater.on('error', (e) => {
+    return { version, source, available };
+  })().catch((e) => {
     updateStatusText = 'ошибка проверки: ' + (e.message || e);
-  });
-  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000).unref();
-  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 3600 * 1000).unref();
+    throw e;
+  }).finally(() => { updateCheckPending = null; });
+  return updateCheckPending;
+}
+
+function setupUpdater() {
+  if (!app.isPackaged || IS_SMOKE) return;
+  // Проверка доступна в том числе portable-версии; автоустановка отключена.
+  setTimeout(() => checkForUpdates(true).catch(() => {}), 30000).unref();
+  setInterval(() => checkForUpdates(true).catch(() => {}), 6 * 3600 * 1000).unref();
 }
 
 function manualUpdateCheck() {
-  if (!autoUpdater) {
+  checkForUpdates(false).then((r) => {
+    const message = r.available
+      ? 'Доступна версия ' + r.version + updateHint()
+      : 'У вас актуальная версия (' + app.getVersion() + ').';
+    if (Notification.isSupported()) new Notification({ title: 'Fortochka', body: message }).show();
+    else openDiagWindow();
+  }).catch((e) => {
+    log('[updates] ' + (e.message || e));
     openDiagWindow();
-    return;
-  }
-  autoUpdater.checkForUpdates().then((r) => {
-    const v = r && r.updateInfo && r.updateInfo.version;
-    if (v && v !== app.getVersion()) {
-      updateStatusText = 'доступно ' + v;
-      if (Notification.isSupported()) {
-        new Notification({ title: 'Fortochka', body: 'Доступна версия ' + v + updateHint() }).show();
-      }
-    } else {
-      updateStatusText = 'актуальная версия';
-      if (Notification.isSupported()) {
-        new Notification({ title: 'Fortochka', body: 'У вас актуальная версия (' + app.getVersion() + ').' }).show();
-      }
-    }
-  }).catch((e) => { updateStatusText = 'ошибка проверки: ' + (e.message || e); });
+  });
 }
 
 // ---------- smoke-тест ----------
