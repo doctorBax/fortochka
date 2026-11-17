@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const root = path.join(__dirname, '..');
+const root = process.env.FORTOCHKA_BETA_PROJECT_ROOT || path.join(__dirname, '..');
 const file = path.join(root, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
 const number = process.env.GITHUB_RUN_NUMBER || process.argv[2];
