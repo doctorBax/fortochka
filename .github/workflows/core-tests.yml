@@ -1,0 +1,28 @@
+name: core-tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check JavaScript syntax
+        run: |
+          node --check main.js
+          node --check netcore.js
+          node --check tools/patch-worker-fronts.js
+      - name: Run regression tests
+        run: npm test
