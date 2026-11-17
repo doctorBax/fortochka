@@ -334,7 +334,7 @@ function buildDnsQuery(name) {
     const b = Buffer.from(l);
     return Buffer.concat([Buffer.from([b.length]), b]);
   });
-  return Buffer.concat([hdr, ...labels, Buffer.from([0, 0, 0, 1, 0, 1])]); // root, A, IN
+  return Buffer.concat([hdr, ...labels, Buffer.from([0, 0, 1, 0, 1])]); // root, A, IN
 }
 
 function parseDnsA(buf) {
