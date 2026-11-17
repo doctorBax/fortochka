@@ -68,3 +68,32 @@ test('allowlist excludes unrelated hosts and suffix lookalikes', () => {
   assert.equal(al.allows('kws2.example.org.attacker.test'), false);
   assert.equal(al.allows('example.org.attacker.test'), false);
 });
+
+test('front probes have bounded concurrency and preserve input order', async () => {
+  const domains = Array.from({ length: 26 }, (_, i) => 'front' + i + '.example');
+  const fm = new FrontManager({ fronts: { list: domains } }, '/tmp/state.json');
+  let active = 0, peak = 0;
+  fm.probeHost = async (host) => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, 2));
+    active--;
+    return { alive: true, ms: 2 };
+  };
+  const result = await fm.probeAll();
+  assert.equal(result.length, domains.length);
+  assert.deepEqual(result.map((r) => r.host), domains);
+  assert.ok(peak <= 10, 'peak concurrent probes: ' + peak);
+  assert.ok(peak > 1);
+});
+
+test('one failing probe does not abort all other front health checks', async () => {
+  const fm = new FrontManager({ fronts: { list: ['one.example', 'two.example'] } }, '/tmp/state.json');
+  fm.probeHost = async (host) => {
+    if (host.includes('one.example')) throw new Error('network error');
+    return { alive: true, ms: 3 };
+  };
+  const result = await fm.probeAll();
+  assert.equal(result[0].alive, false);
+  assert.equal(result[1].alive, true);
+});
