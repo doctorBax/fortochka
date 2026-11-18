@@ -8,7 +8,7 @@ test('local application origin only: no prefix spoofing or foreign port', () => 
   assert.equal(classifyLink(own + '/fortochka/diag', own), 'internal');
   assert.equal(classifyLink(own + '/', own), 'internal');
   assert.equal(classifyLink('http://127.0.0.1:1082/', own), 'external');
-  assert.equal(classifyLink('http://127.0.0.1:1081.evil.example/', own), 'external');
+  assert.equal(classifyLink('http://127.0.0.1:1081.evil.example/', own), 'ignore'); // invalid URL is rejected safely
   assert.equal(classifyLink('https://example.org/', own), 'external');
   assert.equal(classifyLink('http://example.org', own), 'external');
 });
