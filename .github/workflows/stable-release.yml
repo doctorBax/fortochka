@@ -1,0 +1,193 @@
+name: stable-release
+
+# Stable releases are built from main only, after tests + Windows/macOS smoke.
+# Pull requests run the same gates without publishing.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fortochka-stable-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit & integration / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check runtime JavaScript syntax
+        run: |
+          node --check main.js
+          node --check netcore.js
+          node --check external-links.js
+          node --check staticserve.js
+          node --check updatecheck.js
+          node --check tools/patch-worker-fronts.js
+      - name: Run deterministic regression tests
+        run: npm test
+
+  windows:
+    name: Windows packaged runtime
+    needs: tests
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build NSIS + portable packages
+        run: npm run dist -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check installer artifacts and metadata
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json | ConvertFrom-Json).version
+          foreach ($file in @("release/fortochka-setup-$v.exe", "release/fortochka-portable-$v.exe")) {
+            if (!(Test-Path $file)) { throw "Required Windows artifact missing: $file" }
+            if ((Get-Item $file).Length -lt 1000000) { throw "Artifact unexpectedly small: $file" }
+          }
+          if (!(Test-Path "release/win-unpacked/Fortochka.exe")) {
+            throw "Unpacked Windows application missing"
+          }
+      - name: Smoke packaged Windows UI, service worker and native bridge
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json | ConvertFrom-Json).version
+          & ./tools/windows-packaged-smoke.ps1 -Executable "release/win-unpacked/Fortochka.exe" -ExpectedVersion $v
+      - name: Upload validated Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-windows
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            release/fortochka-setup-*.exe
+            release/fortochka-portable-*.exe
+            release/latest.yml
+            release/*.blockmap
+
+  macos:
+    name: macOS packaged runtime
+    needs: tests
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build universal DMG + ZIP
+        run: npm run dist:mac -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Packaged application smoke (install, launch, local API)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./package.json').version")"
+          FORTOCHKA_REQUIRE_LIVE_FRONTS=0 bash tools/mac-packaged-smoke.sh \
+            "release/fortochka-mac-$VER.dmg" "$VER" packaged-smoke-macos.png
+      - name: Check macOS package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./package.json').version")"
+          test -s "release/fortochka-mac-$VER.dmg"
+          test -s "release/fortochka-mac-$VER.zip"
+      - name: Upload validated macOS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-macos
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            release/fortochka-mac-*.dmg
+            release/fortochka-mac-*.zip
+            release/latest-mac.yml
+            packaged-smoke-macos.png
+
+  publish:
+    name: Publish ordinary stable release
+    needs: [tests, windows, macos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download validated binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stable-*
+          merge-multiple: true
+          path: artifacts
+      - name: Publish version only after every platform gate passed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./package.json').version")"
+          [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Refusing nonstable version: $VER"; exit 1;
+          }
+          TAG="v$VER"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it"
+            exit 1
+          fi
+          test -s "artifacts/fortochka-setup-$VER.exe"
+          test -s "artifacts/fortochka-portable-$VER.exe"
+          test -s "artifacts/fortochka-mac-$VER.dmg"
+          test -s "artifacts/fortochka-mac-$VER.zip"
+          ( cd artifacts && sha256sum fortochka-*.exe fortochka-*.dmg fortochka-*.zip > SHA256SUMS.txt )
+          cat > release-notes.md <<'NOTES'
+          ## Fortochka Stable 0.2.8
+
+          Stable update for Windows and macOS.
+
+          - Fixed incorrect proxy port selection and DNS-over-HTTPS packet encoding.
+          - Improved front health checks, network timeouts, and native bridge restarts.
+          - External links now use the system default browser instead of blank child windows.
+          - Update checks work without `latest.yml`; automatic execution of unsigned installers remains disabled.
+          - Lowered memory spikes by streaming bundled assets and limiting concurrent front probes.
+          - Added detailed memory reporting to diagnostics.
+          - Windows installer + portable, macOS universal DMG + ZIP.
+          - Unit/integration tests and packaged runtime smoke checked on Windows/macOS before release.
+
+          Note: connectivity of external front domains varies by network and location.
+          NOTES
+          gh release create "$TAG" artifacts/* \
+            --target "$GITHUB_SHA" \
+            --title "Fortochka $TAG" \
+            --notes-file release-notes.md \
+            --latest
+          gh release view "$TAG"

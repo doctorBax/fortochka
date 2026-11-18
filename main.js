@@ -16,16 +16,19 @@
 const { app, BrowserWindow, Tray, Menu, session, nativeImage, Notification, powerSaveBlocker, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const fsp = require('fs/promises');
 const net = require('net');
 const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const netcore = require('./netcore');
+const { serveStaticFile } = require('./staticserve');
+const { RELEASES_URL, getLatestVersion, compareVersions } = require('./updatecheck');
+const { routeLink, classifyLink } = require('./external-links');
 const DIAG_PAGE = require('./diagpage');
 
-const IS_SMOKE = process.argv.includes('--smoke');
+const IS_SMOKE_OFFLINE = process.argv.includes('--smoke-offline');
+const IS_SMOKE = process.argv.includes('--smoke') || IS_SMOKE_OFFLINE;
 const IS_DIRECT = process.argv.includes('--direct'); // без прокси-цепочки, wss напрямую (для отладки)
 const IS_HIDDEN = process.argv.includes('--hidden'); // автостарт свёрнутым
 const IS_DEBUG = !!process.env.FORTOCHKA_DEBUG;      // подробные логи страницы: CSP-блоки, ошибки загрузки
@@ -119,8 +122,14 @@ async function chooseServicePorts() {
 const doh = new netcore.DohResolver(config, log);
 const frontManager = new netcore.FrontManager(config, stateFile, log, doh);
 const allowlist = new netcore.Allowlist(config, frontManager);
-frontManager.start();
-frontManager.startPeriodicProbes();
+if (IS_SMOKE_OFFLINE) {
+  // Deterministic CI smoke: no dependence on public DNS, frontend availability
+  // or geographic routing. Live connectivity still has a separate smoke mode.
+  frontManager.probesDone = true;
+} else {
+  frontManager.start();
+  frontManager.startPeriodicProbes();
+}
 
 // ---------- сброс кэша Chromium при смене схемы ----------
 // Хешированные бандлы webk отдаются immutable на год; session.clearCache()
@@ -173,6 +182,7 @@ process.on('unhandledRejection', (reason) => logRuntimeError('unhandled-rejectio
 
 // ---------- tg-ws-proxy-rs как child process ----------
 let tgwsProc = null;
+let tgwsRunning = false;
 let tgwsFailures = 0;
 let tgwsRestarting = false;
 let quitting = false;
@@ -200,33 +210,66 @@ function startTgws() {
   }
   if (!IS_DIRECT) args.push('--no-outbound-proxy'); // не подхватывать случайные HTTP(S)_PROXY
   tgwsProc = spawn(TGWS_EXE, args, { windowsHide: true, stdio: ['ignore', fd, fd] });
-  tgwsProc.on('exit', (code) => scheduleTgwsRestart(fd, `процесс вышел (code=${code})`));
+  tgwsProc.on('exit', (code) => { tgwsRunning = false; scheduleTgwsRestart(fd, 'процесс вышел (code=' + code + ')'); });
   // без обработчика 'error' неудачный спавн (нет прав/файла) крешит main
   // молча — окно вообще не откроется. Лог + перезапуск по бэкоффу.
-  tgwsProc.on('error', (e) => scheduleTgwsRestart(fd, 'spawn error: ' + (e && e.message || e)));
-  tgwsProc.on('spawn', () => { tgwsFailures = 0; });
+  tgwsProc.on('error', (e) => { tgwsRunning = false; scheduleTgwsRestart(fd, 'spawn error: ' + (e && e.message || e)); });
+  tgwsProc.on('spawn', () => {
+    tgwsRunning = true;
+    const proc = tgwsProc;
+    const t = setTimeout(() => {
+      if (tgwsRunning && tgwsProc === proc) tgwsFailures = 0;
+    }, 60000);
+    t.unref();
+  });
 }
 
 // ---------- SOCKS5-клиент (до tg-ws-proxy) ----------
 function socksConnect(ipStr, port, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const s = net.connect({ host: '127.0.0.1', port: SOCKS_PORT });
-    let stage = 0;
-    const fail = (msg) => { s.destroy(); reject(new Error(msg)); };
+    const ip = ipStr.split('.').map(Number);
+    let stage = 0, settled = false, buffer = Buffer.alloc(0);
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      s.destroy();
+      reject(new Error(message));
+    };
+    if (ip.length !== 4 || ip.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      fail('invalid SOCKS destination IPv4');
+      return;
+    }
     s.setTimeout(timeoutMs, () => fail('socks timeout'));
     s.on('error', (e) => fail('socks: ' + e.message));
     s.on('connect', () => s.write(Buffer.from([5, 1, 0])));
-    s.on('data', (d) => {
+    const onData = (data) => {
+      if (settled) return;
+      buffer = Buffer.concat([buffer, data]);
       if (stage === 0) {
-        if (d.length < 2 || d[0] !== 5 || d[1] !== 0) return fail('socks greeting: ' + d.toString('hex'));
+        if (buffer.length < 2) return;
+        if (buffer[0] !== 5 || buffer[1] !== 0) return fail('socks greeting: ' + buffer.toString('hex'));
+        buffer = buffer.subarray(2);
         stage = 1;
-        const ip = ipStr.split('.').map(Number);
-        s.write(Buffer.from([5, 1, 0, 1, ip[0], ip[1], ip[2], ip[3], port >> 8, port & 255]));
-      } else {
-        if (d.length > 1 && d[1] === 0) { s.setTimeout(0); resolve(s); }
-        else fail('socks reply code=' + (d[1] ?? '?'));
+        s.write(Buffer.from([5, 1, 0, 1, ...ip, port >> 8, port & 255]));
       }
-    });
+      if (stage === 1 && buffer.length >= 4) {
+        if (buffer[0] !== 5 || buffer[2] !== 0) return fail('invalid SOCKS reply');
+        const atyp = buffer[3];
+        if (atyp !== 1 && atyp !== 3 && atyp !== 4) return fail('invalid SOCKS address type');
+        if (atyp === 3 && buffer.length < 5) return;
+        const addressSize = atyp === 1 ? 4 : atyp === 4 ? 16 : 1 + buffer[4];
+        const replySize = 4 + addressSize + 2;
+        if (buffer.length < replySize) return;
+        if (buffer[1] !== 0) return fail('socks reply code=' + buffer[1]);
+        settled = true;
+        s.removeListener('data', onData);
+        s.setTimeout(0);
+        if (buffer.length > replySize) s.unshift(buffer.subarray(replySize));
+        resolve(s);
+      }
+    };
+    s.on('data', onData);
   });
 }
 
@@ -275,23 +318,18 @@ function cacheControlFor(file) {
   return 'no-cache';
 }
 
-async function serveStatic(req, res) {
-  let rel = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  if (rel === '/' || rel === '') rel = '/index.html';
-  const file = path.normalize(path.join(WEBAPP_DIR, rel));
-  if (!file.startsWith(WEBAPP_DIR)) { res.writeHead(403).end(); return; }
-  try {
-    const data = await fsp.readFile(file);
-    const headers = {
-      'content-type': contentType(file),
-      'cache-control': cacheControlFor(file)
-    };
-    if (!process.env.FORTOCHKA_NO_CSP) headers['content-security-policy'] = CSP; // отладка CSP
-    res.writeHead(200, headers);
-    res.end(data);
-  } catch {
-    res.writeHead(404).end('not found');
-  }
+function serveStatic(req, res) {
+  return serveStaticFile(req, res, {
+    root: WEBAPP_DIR,
+    headersFor: (file) => {
+      const headers = {
+        'content-type': contentType(file),
+        'cache-control': cacheControlFor(file)
+      };
+      if (!process.env.FORTOCHKA_NO_CSP) headers['content-security-policy'] = CSP;
+      return headers;
+    }
+  });
 }
 
 function pipe(a, b) {
@@ -306,22 +344,30 @@ function pipe(a, b) {
 function onConnect(req, clientSocket, head) {
   const [host, portStr] = req.url.split(':');
   const port = +portStr || 443;
-  if (!allowlist.allows(host)) {
+  clientSocket.on('error', () => {});
+  // A failed or cancelled Chromium connection must not leave an orphaned
+  // upstream socket after an asynchronous DNS lookup.
+  clientSocket.setTimeout(15000, () => clientSocket.destroy());
+  if (port !== 443 || !allowlist.allows(host)) {
     log('[connect] заблокирован allowlist-ом: ' + host);
     clientSocket.destroy();
     return;
   }
-  // Чистый TCP-релей: TLS end-to-end между Chromium и Telegram. SNI шлёт сам
-  // Chromium, поэтому шимму достаточно коннектиться в IP (или в имя — его
-  // резолвит ОС). Веб-эндпоинты *.web.telegram.org живут на своих IP,
-  // не на raw-MTProto адресах контроллеров. Почему не tgws-SOCKS — в README.
   (async () => {
-    const ips = await doh.lookup(host).catch((e) => { log('[doh] ошибка ' + host + ': ' + e.message); return null; });
+    const ips = await doh.lookup(host).catch((e) => {
+      log('[doh] ошибка ' + host + ': ' + e.message);
+      return null;
+    });
+    if (clientSocket.destroyed) return;
     const target = ips && ips.length ? ips[Math.floor(Math.random() * ips.length)] : host;
     log('[connect] ' + host + ' -> ' + target + (ips ? ' (DoH)' : ' (system)'));
     const upstream = net.connect(port, target);
+    upstream.setTimeout(15000, () => upstream.destroy());
     upstream.on('connect', () => {
+      if (clientSocket.destroyed) { upstream.destroy(); return; }
       log('[connect] ' + host + ' -> установлен');
+      clientSocket.setTimeout(0);
+      upstream.setTimeout(0);
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length) upstream.write(head);
       pipe(clientSocket, upstream);
@@ -330,8 +376,11 @@ function onConnect(req, clientSocket, head) {
       log('[connect] ' + host + ' upstream error: ' + e.message);
       clientSocket.destroy();
     });
-    clientSocket.on('error', () => {});
-  })();
+    clientSocket.once('close', () => upstream.destroy());
+  })().catch((e) => {
+    log('[connect] ' + host + ' internal error: ' + (e.message || e));
+    clientSocket.destroy();
+  });
 }
 
 // ---------- /fortochka/* — маршруты для webk и страницы диагностики ----------
@@ -343,13 +392,27 @@ function sendJson(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function memorySnapshot() {
+  // Electron process metrics are reported in KiB; excludes the Rust tg-ws-proxy child.
+  const processes = app.getAppMetrics();
+  const sum = (key) => processes.reduce((total, proc) => total +
+    (Number.isFinite(proc.memory && proc.memory[key]) ? proc.memory[key] : 0), 0);
+  const toMiB = (kib) => Math.round(kib / 1024);
+  const hasPrivate = processes.some((proc) => Number.isFinite(proc.memory && proc.memory.privateBytes));
+  return {
+    processes: processes.length,
+    workingSetMB: toMiB(sum('workingSetSize')),
+    privateMB: hasPrivate ? toMiB(sum('privateBytes')) : null,
+    mainHeapMB: Math.round(process.memoryUsage().heapUsed / (1024 * 1024))
+  };
+}
+
 function updaterStatusText() {
-  if (!autoUpdater) return 'недоступны (dev или portable — обновляйтесь с GitHub)';
-  return updateStatusText || 'проверяется...';
+  return updateStatusText || 'ещё не проверялись';
 }
 
 // подсказка «что делать с найденным обновлением» — зависит от платформы
-const updateHint = () => IS_MAC ? ' — скачайте новый DMG с GitHub.' : ' — скачается и установится при выходе.';
+const updateHint = () => ' — скачайте установщик вручную с GitHub Releases.';
 
 async function handleFortochka(req, res) {
   const url = new URL(req.url, 'http://x');
@@ -367,29 +430,36 @@ async function handleFortochka(req, res) {
       sendJson(res, 200, {
         version: app.getVersion(),
         fronts: frontManager.diag(),
-        tgws: { running: !!tgwsProc && !tgwsProc.killed, pid: tgwsProc && tgwsProc.pid },
+        tgws: { running: tgwsRunning, pid: tgwsProc && tgwsProc.pid },
         doh: !(config.doh && config.doh.enabled === false),
         profile: USER_DATA,
         log: tgwsLogPath(),
         updater: updaterStatusText(),
+        memory: memorySnapshot(),
         blocked: allowlist.blocked.map((b) => b.host)
       });
     } else if (ep === 'probe' && req.method === 'POST') {
       sendJson(res, 200, { fronts: frontManager.diag(), health: await frontManager.probeAll() });
     } else if (ep === 'upcheck' && req.method === 'POST') {
-      if (!autoUpdater) { sendJson(res, 200, { message: 'Обновления недоступны в этом режиме — скачайте с GitHub.' }); }
-      else {
-        updateStatusText = 'проверяется...';
-        try {
-          const r = await autoUpdater.checkForUpdates();
-          const v = r && r.updateInfo && r.updateInfo.version;
-          updateStatusText = v && v !== app.getVersion() ? 'доступно ' + v + ' — скачается само' : 'актуальная версия';
-          sendJson(res, 200, { message: v && v !== app.getVersion() ? 'Доступна версия ' + v + updateHint() : 'У вас актуальная версия (' + app.getVersion() + ').', latest: v });
-        } catch (e) {
-          updateStatusText = 'ошибка проверки';
-          sendJson(res, 200, { message: 'Не удалось проверить: ' + (e.message || e) });
-        }
+      try {
+        const result = await checkForUpdates(false);
+        sendJson(res, 200, {
+          message: result.available
+            ? 'Доступна версия ' + result.version + updateHint()
+            : 'У вас актуальная версия (' + app.getVersion() + ').',
+          latest: result.version,
+          source: result.source,
+          url: RELEASES_URL
+        });
+      } catch (e) {
+        sendJson(res, 200, {
+          message: 'Не удалось проверить обновления: ' + (e.message || e),
+          url: RELEASES_URL
+        });
       }
+    } else if (ep === 'openreleases' && req.method === 'POST') {
+      shell.openExternal(RELEASES_URL).catch((e) => log('[updates] browser: ' + e.message));
+      sendJson(res, 200, {});
     } else if (ep === 'openlog' && req.method === 'POST') {
       shell.showItemInFolder(tgwsLogPath()); sendJson(res, 200, {});
     } else if (ep === 'openprofile' && req.method === 'POST') {
@@ -424,31 +494,43 @@ function openDiagWindow() {
 }
 
 function startWebServer() {
-  const server = http.createServer((req, res) => {
-    Promise.resolve(handleFortochka(req, res))
-      .then((handled) => { if (!handled) return serveStatic(req, res); })
-      .catch(() => { try { res.writeHead(500).end(); } catch {} });
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      Promise.resolve(handleFortochka(req, res))
+        .then((handled) => { if (!handled) return serveStatic(req, res); })
+        .catch(() => { try { res.writeHead(500).end(); } catch {} });
+    });
+    server.on('connect', onConnect);
+    server.once('error', (e) => {
+      log('[web-server] не смог подняться на ' + WEB_PORT + ': ' + e.message);
+      reject(e);
+    });
+    server.listen(WEB_PORT, '127.0.0.1', () => resolve(server));
   });
-  server.on('connect', onConnect);
-  server.listen(WEB_PORT, '127.0.0.1');
-  // без обработчика EADDRINUSE Electron показывает красный диалог — гасим тихо
-  server.on('error', (e) => {
-    log('[web-server] не смог подняться на ' + WEB_PORT + ': ' + e.message);
-  });
-  return server;
 }
 
-// ---------- разрешения (уведомления, камера/микрофон для звонков) ----------
+// ---------- разрешения// ---------- разрешения (уведомления, камера/микрофон для звонков) ----------
 const ALLOWED = new Set(['media', 'audioCapture', 'videoCapture', 'notifications',
   'clipboard-read', 'clipboard-sanitized-write', 'fullscreen', 'display-capture', 'pointerLock']);
 
-function configureSession() {
+async function configureSession() {
   const ses = session.defaultSession;
-  ses.setPermissionRequestHandler((wc, permission, cb) => cb(ALLOWED.has(permission)));
-  ses.setPermissionCheckHandler((wc, permission) => ALLOWED.has(permission));
+  const ownOrigin = 'http://127.0.0.1:' + WEB_PORT;
+  const local = (value) => {
+    try { return new URL(value).origin === ownOrigin; } catch { return false; }
+  };
+  const ownedWindow = (wc) => !!wc && (
+    (win && !win.isDestroyed() && wc.id === win.webContents.id) ||
+    (diagWin && !diagWin.isDestroyed() && wc.id === diagWin.webContents.id)
+  );
+  ses.setPermissionRequestHandler((wc, permission, cb, details = {}) => {
+    cb(ownedWindow(wc) && ALLOWED.has(permission) && local(details.securityOrigin || details.requestingUrl));
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details = {}) => {
+    return ownedWindow(wc) && ALLOWED.has(permission) && local(details.securityOrigin || requestingOrigin);
+  });
   if (!IS_DIRECT) {
-    // весь внешний трафик (включая wss) — через наш CONNECT-шимм
-    ses.setProxy({ proxyRules: `http://127.0.0.1:${WEB_PORT}`, proxyBypassRules: '<local>' });
+    await ses.setProxy({ proxyRules: 'http://127.0.0.1:' + WEB_PORT, proxyBypassRules: '<local>' });
   }
 }
 
@@ -553,6 +635,21 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false
     }
+  });
+
+  const localOrigin = 'http://127.0.0.1:' + WEB_PORT;
+  const openOutside = (url) => routeLink(url, localOrigin, {
+    openExternal: (href) => shell.openExternal(href),
+    openTelegram: (href) => handleTgLink(href)
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openOutside(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (classifyLink(url, localOrigin) === 'internal') return;
+    event.preventDefault();
+    openOutside(url);
   });
 
   win.webContents.on('before-input-event', (e, input) => {
@@ -692,6 +789,7 @@ function createTray() {
     { label: 'Открыть', click: showWindow },
     { label: 'Диагностика', click: openDiagWindow },
     { label: 'Проверить обновления', click: () => manualUpdateCheck() },
+    { label: 'Открыть страницу релизов', click: () => shell.openExternal(RELEASES_URL).catch(() => {}) },
     { label: 'Автозапуск', type: 'checkbox', checked: app.getLoginItemSettings().openAtLogin,
       click: (mi) => app.setLoginItemSettings({
         openAtLogin: mi.checked, path: process.execPath,
@@ -721,6 +819,11 @@ function handleTgLink(url) {
   ).catch(() => {});
 }
 
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleTgLink(url);
+});
+
 function registerProtocol() {
   if (!app.isPackaged) return; // в dev схему не трогаем
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
@@ -729,60 +832,64 @@ function registerProtocol() {
   }
 }
 
-// ---------- автообновление (GitHub Releases) ----------
-let autoUpdater = null;
+// ---------- проверка наличия обновлений (без загрузки исполняемых файлов) ----------
 let updateStatusText = '';
+let updateCheckPending = null;
+let lastNotifiedVersion = '';
+
+async function checkForUpdates(notify = false) {
+  if (updateCheckPending) return updateCheckPending;
+  updateStatusText = 'проверяется...';
+  updateCheckPending = (async () => {
+    // GitHub Releases API не требует latest.yml. При недоступности API используем CDN.
+    const { version, source } = await getLatestVersion();
+    const available = compareVersions(version, app.getVersion()) > 0;
+    updateStatusText = available
+      ? 'доступно ' + version + ' — установка вручную'
+      : 'актуальная версия (' + app.getVersion() + ')';
+    if (notify && available && version !== lastNotifiedVersion && Notification.isSupported()) {
+      lastNotifiedVersion = version;
+      const notice = new Notification({
+        title: 'Fortochka',
+        body: 'Доступна версия ' + version + '. Откройте релизы для ручного обновления.'
+      });
+      notice.on('click', () => shell.openExternal(RELEASES_URL).catch(() => {}));
+      notice.show();
+    }
+    return { version, source, available };
+  })().catch((e) => {
+    updateStatusText = 'ошибка проверки: ' + (e.message || e);
+    throw e;
+  }).finally(() => { updateCheckPending = null; });
+  return updateCheckPending;
+}
 
 function setupUpdater() {
-  // portable не умеет самообновляться — только напоминание на странице диагностики
-  if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_DIR) return;
-  let au;
-  try { au = require('electron-updater').autoUpdater; } catch { return; }
-  autoUpdater = au;
-  // самоподписанный серт: стандартная проверка подписи обновления не пройдёт
-  autoUpdater.verifyUpdateCodeSignature = async () => null;
-  // mac: подпись ad-hoc — автоматическую замену .app не включаем, только сообщаем
-  autoUpdater.autoDownload = !IS_MAC;
-  autoUpdater.on('update-downloaded', (info) => {
-    updateStatusText = 'скачано ' + info.version + ' — установится при выходе';
-    if (Notification.isSupported()) {
-      new Notification({
-        title: 'Fortochka',
-        body: `Обновление ${info.version} скачано — установится при выходе из приложения.`
-      }).show();
-    }
-  });
-  autoUpdater.on('error', () => {});
-  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000);
-  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 3600 * 1000).unref();
+  if (!app.isPackaged || IS_SMOKE) return;
+  // Проверка доступна в том числе portable-версии; автоустановка отключена.
+  setTimeout(() => checkForUpdates(true).catch(() => {}), 30000).unref();
+  setInterval(() => checkForUpdates(true).catch(() => {}), 6 * 3600 * 1000).unref();
 }
 
 function manualUpdateCheck() {
-  if (!autoUpdater) {
+  checkForUpdates(false).then((r) => {
+    const message = r.available
+      ? 'Доступна версия ' + r.version + updateHint()
+      : 'У вас актуальная версия (' + app.getVersion() + ').';
+    if (Notification.isSupported()) new Notification({ title: 'Fortochka', body: message }).show();
+    else openDiagWindow();
+  }).catch((e) => {
+    log('[updates] ' + (e.message || e));
     openDiagWindow();
-    return;
-  }
-  autoUpdater.checkForUpdates().then((r) => {
-    const v = r && r.updateInfo && r.updateInfo.version;
-    if (v && v !== app.getVersion()) {
-      updateStatusText = 'доступно ' + v;
-      if (Notification.isSupported()) {
-        new Notification({ title: 'Fortochka', body: 'Доступна версия ' + v + updateHint() }).show();
-      }
-    } else {
-      updateStatusText = 'актуальная версия';
-      if (Notification.isSupported()) {
-        new Notification({ title: 'Fortochka', body: 'У вас актуальная версия (' + app.getVersion() + ').' }).show();
-      }
-    }
-  }).catch((e) => { updateStatusText = 'ошибка проверки: ' + (e.message || e); });
+  });
 }
 
 // ---------- smoke-тест ----------
+let smokeStarted = false;
 let smokeDone = false;
 async function runSmokeChecks() {
-  if (!IS_SMOKE || smokeDone) return;
-  smokeDone = true;
+  if (!IS_SMOKE || smokeStarted) return;
+  smokeStarted = true;
   const out = { webapp: null, sw: null, fronts: null, wss: null, socks: null };
   try {
     out.webapp = await win.webContents.executeJavaScript(
@@ -810,6 +917,7 @@ async function runSmokeChecks() {
   } catch (e) {
     out.fronts = { ok: false, error: String(e) };
   }
+  if (!IS_SMOKE_OFFLINE) {
   try {
     // тест wss из контекста страницы — как делает webk (subprotocol 'binary'
     // обязателен: без него apiws отвечает 404). Фронт берём верхний из
@@ -836,10 +944,18 @@ async function runSmokeChecks() {
   } catch (e) {
     out.socks = { ok: false, info: String(e) };
   }
+  } else {
+    out.wss = 'skipped: offline CI';
+    out.socks = { ok: true, info: 'skipped: offline CI' };
+  }
+  out.version = app.getVersion();
+  out.tgwsRunning = tgwsRunning;
   const ok = out.webapp && !out.webapp.error && out.webapp.hasPageChats
     && out.sw && out.sw.count > 0
     && out.fronts && out.fronts.ok
-    && out.wss === 'open' && out.socks && out.socks.ok;
+    && (IS_SMOKE_OFFLINE || out.wss === 'open') && out.socks && out.socks.ok
+    && (!IS_SMOKE_OFFLINE || out.tgwsRunning);
+  smokeDone = true;
   console.log(ok ? 'SMOKE_OK ' + JSON.stringify(out) : 'SMOKE_FAIL ' + JSON.stringify(out));
   quitting = true;
   app.exit(ok ? 0 : 1);
@@ -857,15 +973,16 @@ app.on('activate', () => { if (!IS_SMOKE) showWindow(); });
 
 app.whenReady().then(async () => {
   try {
-    configureSession();
-    trace('session ok');
     await chooseServicePorts();
-    startWebServer();
+    await configureSession();
+    trace('session ok');
+    await startWebServer();
     trace('web server ok');
     // окно раньше движка: что бы ни случилось со спавном бинарника,
     // окно уже открыто, а движок доедет (webk сам переподключается)
     createWindow();
     trace('window created');
+    registerProtocol();
     startTgws();
     trace('tgws spawned');
     setupMacMenu();

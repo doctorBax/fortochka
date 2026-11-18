@@ -42,6 +42,7 @@ module.exports = `<!doctype html>
     <div id="app"></div>
     <div style="margin-top:10px">
       <button id="b-upd">Проверить обновления</button>
+      <button id="b-releases">Открыть релизы в браузере</button>
       <button id="b-log">Открыть лог движка</button>
       <button id="b-profile">Открыть профиль</button>
     </div>
@@ -92,7 +93,13 @@ async function refresh() {
     kv('DoH', st.doh ? 'включён' : 'выключен (системный DNS)');
     kv('Профиль', st.profile);
     kv('Лог', st.log);
-    kv('Обновления', st.updater || 'недоступны (dev-режим)');
+    kv('Обновления', st.updater || 'не проверялись');
+    if (st.memory) {
+      kv('Процессов Electron', String(st.memory.processes));
+      if (st.memory.privateMB != null) kv('RAM Electron (private)', st.memory.privateMB + ' МиБ');
+      kv('RAM Electron (working set)', st.memory.workingSetMB + ' МиБ');
+      kv('JS heap основного процесса', st.memory.mainHeapMB + ' МиБ');
+    }
     kv('Заблокировано CONNECT', st.blocked.length ? st.blocked.slice(0, 5).join(', ') : 'ничего');
   } catch (e) { $('msg').textContent = 'Ошибка: ' + e.message; }
 }
@@ -107,6 +114,7 @@ $('b-upd').onclick = async (e) => {
   catch (err) { $('msg').textContent = 'Обновления: ' + err.message; }
   e.target.disabled = false; refresh();
 };
+$('b-releases').onclick = () => api('openreleases', { method: 'POST' });
 $('b-log').onclick = () => api('openlog', { method: 'POST' });
 $('b-profile').onclick = () => api('openprofile', { method: 'POST' });
 refresh(); setInterval(refresh, 5000);

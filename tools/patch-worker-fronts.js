@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const WEBAPP = path.join(__dirname, '..', 'webapp');
+const WEBAPP = process.env.FORTOCHKA_WEBAPP_DIR || path.join(__dirname, '..', 'webapp');
 const MARK = '__fortochkaFronts';
 
 const files = fs.readdirSync(WEBAPP).filter((f) => /^index\.worker-.*\.js$/.test(f) && !f.endsWith('.map'));
@@ -54,16 +54,20 @@ for (const f of files) {
   const sufRe = /toLowerCase\(\)\}ws\$\{(\w+)\}\$\{(\w+)\}/;
   // самопочинка состояния после кривой замены `ws$r` (без скобок — литерал в шаблоне)
   const brokenRe = /toLowerCase\(\)\}ws\$(\w+)`/;
+  const malformedTemplateRe = /toLowerCase\(\)\}ws\$\{(\w+)`/;
   if (sufRe.test(src)) {
     const hits = src.match(new RegExp(sufRe.source, 'g')).length;
     if (hits !== 1) {
       console.error(f + ': паттерн суффикса найден ' + hits + ' раз (ожидался 1) — правка вручную');
       process.exit(1);
     }
-    src = src.replace(sufRe, 'toLowerCase()}ws$${$1');
+    src = src.replace(sufRe, 'toLowerCase()}ws$${$1}');
     console.log(f + ': медиа-суффикс -1 убран (kws{dc}-1 -> kws{dc})');
+  } else if (malformedTemplateRe.test(src)) {
+    src = src.replace(malformedTemplateRe, 'toLowerCase()}ws$${$1}`');
+    console.log(f + ': восстановлен повреждённый шаблон медиа-хоста');
   } else if (brokenRe.test(src)) {
-    src = src.replace(brokenRe, 'toLowerCase()}ws${$1}`');
+    src = src.replace(brokenRe, 'toLowerCase()}ws$${$1}`');
     console.log(f + ': починена кривая замена (ws$r -> ws${r})');
   } else if (/toLowerCase\(\)\}ws\$\{\w+\}`/.test(src)) {
     console.log(f + ': суффикс уже убран, пропуск');
