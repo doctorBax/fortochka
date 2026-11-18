@@ -160,6 +160,21 @@ jobs:
             echo "Refusing nonstable version: $VER"; exit 1;
           }
           TAG="v$VER"
+          # download-artifact keeps nested release/ paths if a mixed-root
+          # artifact also contains screenshots. Flatten safely before checks.
+          find artifacts -type f -print
+          while IFS= read -r -d '' source; do
+            target="artifacts/$(basename "$source")"
+            if [ "$source" != "$target" ]; then
+              if [ -e "$target" ]; then
+                echo "Duplicate artifact name: $source and $target"
+                exit 1
+              fi
+              mv "$source" "$target"
+            fi
+          done < <(find artifacts -mindepth 2 -type f -print0)
+          echo "Normalized artifacts:"
+          find artifacts -maxdepth 1 -type f -print
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; refusing to overwrite it"
             exit 1
