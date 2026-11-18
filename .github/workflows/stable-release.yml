@@ -200,7 +200,11 @@ jobs:
 
           Note: connectivity of external front domains varies by network and location.
           NOTES
-          gh release create "$TAG" artifacts/* \
+          # Only upload regular files. The artifact downloader may leave
+          # an empty artifacts/release directory after normalization.
+          mapfile -d '' -t release_files < <(find artifacts -maxdepth 1 -type f -print0)
+          test "${#release_files[@]}" -ge 5
+          gh release create "$TAG" "${release_files[@]}" \
             --target "$GITHUB_SHA" \
             --title "Fortochka $TAG" \
             --notes-file release-notes.md \
