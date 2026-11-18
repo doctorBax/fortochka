@@ -1,7 +1,7 @@
 {
   "name": "fortochka",
   "productName": "Fortochka",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "Fortochka — Telegram Web K (webk) как настольное приложение; живые CF-фонты с health-check, DoH, allowlist, автообновления",
   "main": "main.js",
@@ -14,11 +14,12 @@
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",
-    "test": "node --test tests/netcore.test.js tests/worker-patch.test.js tests/updatecheck.test.js tests/staticserve.test.js tests/packaging.test.js",
+    "test": "node --test tests/*.test.js",
     "patch-webapp": "node tools/patch-worker-fronts.js",
     "dist": "electron-builder --win nsis portable",
     "dist:signed": "electron-builder --win nsis portable --config.win.signtoolOptions.certificateFile=build/codesign.pfx",
-    "dist:mac": "electron-builder --mac zip dmg"
+    "dist:mac": "electron-builder --mac zip dmg",
+    "smoke:offline": "electron . --smoke-offline"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"
@@ -33,6 +34,7 @@
     "files": [
       "main.js",
       "netcore.js",
+      "external-links.js",
       "updatecheck.js",
       "staticserve.js",
       "diagpage.js",
