@@ -24,9 +24,11 @@ const { spawn } = require('child_process');
 const netcore = require('./netcore');
 const { serveStaticFile } = require('./staticserve');
 const { RELEASES_URL, getLatestVersion, compareVersions } = require('./updatecheck');
+const { routeLink, classifyLink } = require('./external-links');
 const DIAG_PAGE = require('./diagpage');
 
-const IS_SMOKE = process.argv.includes('--smoke');
+const IS_SMOKE_OFFLINE = process.argv.includes('--smoke-offline');
+const IS_SMOKE = process.argv.includes('--smoke') || IS_SMOKE_OFFLINE;
 const IS_DIRECT = process.argv.includes('--direct'); // без прокси-цепочки, wss напрямую (для отладки)
 const IS_HIDDEN = process.argv.includes('--hidden'); // автостарт свёрнутым
 const IS_DEBUG = !!process.env.FORTOCHKA_DEBUG;      // подробные логи страницы: CSP-блоки, ошибки загрузки
@@ -120,8 +122,14 @@ async function chooseServicePorts() {
 const doh = new netcore.DohResolver(config, log);
 const frontManager = new netcore.FrontManager(config, stateFile, log, doh);
 const allowlist = new netcore.Allowlist(config, frontManager);
-frontManager.start();
-frontManager.startPeriodicProbes();
+if (IS_SMOKE_OFFLINE) {
+  // Deterministic CI smoke: no dependence on public DNS, frontend availability
+  // or geographic routing. Live connectivity still has a separate smoke mode.
+  frontManager.probesDone = true;
+} else {
+  frontManager.start();
+  frontManager.startPeriodicProbes();
+}
 
 // ---------- сброс кэша Chromium при смене схемы ----------
 // Хешированные бандлы webk отдаются immutable на год; session.clearCache()
@@ -629,16 +637,17 @@ function createWindow() {
     }
   });
 
-  const openOutside = (url) => {
-    if (/^tg:/i.test(url)) { handleTgLink(url); return; }
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
-  };
+  const localOrigin = 'http://127.0.0.1:' + WEB_PORT;
+  const openOutside = (url) => routeLink(url, localOrigin, {
+    openExternal: (href) => shell.openExternal(href),
+    openTelegram: (href) => handleTgLink(href)
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     openOutside(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
-    if (url.startsWith('http://127.0.0.1:' + WEB_PORT + '/')) return;
+    if (classifyLink(url, localOrigin) === 'internal') return;
     event.preventDefault();
     openOutside(url);
   });
@@ -908,6 +917,7 @@ async function runSmokeChecks() {
   } catch (e) {
     out.fronts = { ok: false, error: String(e) };
   }
+  if (!IS_SMOKE_OFFLINE) {
   try {
     // тест wss из контекста страницы — как делает webk (subprotocol 'binary'
     // обязателен: без него apiws отвечает 404). Фронт берём верхний из
@@ -934,10 +944,17 @@ async function runSmokeChecks() {
   } catch (e) {
     out.socks = { ok: false, info: String(e) };
   }
+  } else {
+    out.wss = 'skipped: offline CI';
+    out.socks = { ok: true, info: 'skipped: offline CI' };
+  }
+  out.version = app.getVersion();
+  out.tgwsRunning = tgwsRunning;
   const ok = out.webapp && !out.webapp.error && out.webapp.hasPageChats
     && out.sw && out.sw.count > 0
     && out.fronts && out.fronts.ok
-    && out.wss === 'open' && out.socks && out.socks.ok;
+    && (IS_SMOKE_OFFLINE || out.wss === 'open') && out.socks && out.socks.ok
+    && (!IS_SMOKE_OFFLINE || out.tgwsRunning);
   smokeDone = true;
   console.log(ok ? 'SMOKE_OK ' + JSON.stringify(out) : 'SMOKE_FAIL ' + JSON.stringify(out));
   quitting = true;
