@@ -49,3 +49,34 @@ test('static asset server streams GET/HEAD, supports byte ranges and blocks unsa
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('symlink outside webapp is rejected even when link path appears local', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fortochka-link-'));
+  const root = path.join(base, 'webapp');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(base, 'secret.txt'), 'do not serve');
+  try {
+    try { fs.symlinkSync(path.join(base, 'secret.txt'), path.join(root, 'out.txt')); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) { t.skip('symlinks unavailable'); return; }
+      throw error;
+    }
+    const server = http.createServer((req, res) =>
+      serveStaticFile(req, res, { root, headersFor: () => ({ 'content-type': 'text/plain' }) })
+        .catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); }));
+    try {
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const response = await fetch('http://127.0.0.1:' + server.address().port + '/out.txt');
+      assert.equal(response.status, 403);
+      assert.notEqual(await response.text(), 'do not serve');
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('range parser handles empty files, suffix ranges larger than content and invalid syntax', () => {
+  assert.deepEqual(parseRange('bytes=-100', 11), { start: 0, end: 10 });
+  assert.deepEqual(parseRange('bytes=10-999', 11), { start: 10, end: 10 });
+  assert.equal(parseRange('bytes=-0', 11), false);
+  assert.equal(parseRange('bytes=0-3', 0), false);
+  assert.equal(parseRange('items=0-3', 11), false);
+});
