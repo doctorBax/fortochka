@@ -43,6 +43,16 @@ async function serveStaticFile(req, res, { root, headersFor }) {
     stats = await fsp.stat(file);
     if (!stats.isFile()) throw new Error('not a file');
   } catch { res.writeHead(404); res.end('not found'); return; }
+  // A symbolic link inside webapp must not expose arbitrary local files.
+  let realRoot, realFile;
+  try {
+    [realRoot, realFile] = await Promise.all([fsp.realpath(root), fsp.realpath(file)]);
+  } catch { res.writeHead(404); res.end('not found'); return; }
+  const realRelative = path.relative(realRoot, realFile);
+  if (realRelative === '..' || realRelative.startsWith('..' + path.sep) ||
+      path.isAbsolute(realRelative)) {
+    res.writeHead(403); res.end(); return;
+  }
 
   const range = parseRange(req.headers.range, stats.size);
   if (range === false) {
