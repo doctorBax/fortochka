@@ -114,7 +114,7 @@ test('startup releases fronts as soon as the first healthy probe completes', asy
     })),
     new Promise((_, reject) => setTimeout(() => reject(new Error('front list waited for slow probe')), 250))
   ]);
-  assert.match(body, /fast\\.example/);
+  assert.match(body, /fast\.example/);
   releaseSlow();
   await fm.probing;
   fm.stop();
