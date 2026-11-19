@@ -147,6 +147,9 @@ class FrontManager {
     this.fetched = null;      // { domains, source, at }
     this.health = new Map();  // host -> { alive, ms, checkedAt, failStreak }
     this.probing = null;
+    this.firstHealthy = null;
+    this.resolveFirstHealthy = null;
+    this.preferredFront = null;
     this.updateTimer = null;
     this.probeTimer = null;
   }
@@ -155,6 +158,9 @@ class FrontManager {
     // кэш автообновления — сразу, чтобы не ждать сеть
     const cached = loadJson(path.join(path.dirname(this.stateFile), 'fronts-cache.json'), null);
     if (cached && Array.isArray(cached.domains)) this.fetched = cached;
+    const preferred = loadJson(path.join(path.dirname(this.stateFile), 'front-preferred.json'), null);
+    this.preferredFront = preferred && typeof preferred.host === 'string' ? preferred.host : null;
+    this.firstHealthy = new Promise((resolve) => { this.resolveFirstHealthy = resolve; });
     if (this.config.fronts.autoUpdate !== false) {
       this.refreshFromRepo();
       this.updateTimer = setInterval(() => this.refreshFromRepo(), 3 * 60 * 60 * 1000);
@@ -269,13 +275,20 @@ class FrontManager {
   async probeAll(timeoutMs = 6000) {
     if (this.probing) return this.probing;
     const { domains } = this.baseList();
+    // Probe the last known good front first while preserving diagnostics order.
+    const probeOrder = domains.map((_, index) => index);
+    const preferredIndex = domains.indexOf(this.preferredFront);
+    if (preferredIndex > 0) {
+      probeOrder.splice(preferredIndex, 1);
+      probeOrder.unshift(preferredIndex);
+    }
     // Limit simultaneous DoH + TLS probes. Probing every front at once
     // causes short-lived socket/heap spikes on startup, especially on Windows.
     const results = new Array(domains.length);
     let nextIndex = 0;
     const probeWorker = async () => {
       while (nextIndex < domains.length) {
-        const index = nextIndex++;
+        const index = probeOrder[nextIndex++];
         const host = domains[index];
         const previous = this.health.get(host);
         const probeTarget = /^kws\d/.test(host) ? host : 'kws2.' + host;
@@ -291,11 +304,26 @@ class FrontManager {
         };
         this.health.set(host, entry);
         results[index] = { host, ...entry };
+        if (entry.alive && this.resolveFirstHealthy) {
+          this.resolveFirstHealthy();
+          this.resolveFirstHealthy = null;
+        }
       }
     };
     this.probing = Promise.all(
       Array.from({ length: Math.min(10, domains.length) }, () => probeWorker())
-    ).then(() => results).finally(() => { this.probing = null; });
+    ).then(() => {
+      const fastest = results.filter((r) => r && r.alive)
+        .sort((a, b) => a.ms - b.ms)[0];
+      if (fastest && fastest.host !== this.preferredFront) {
+        this.preferredFront = fastest.host;
+        try {
+          fs.writeFileSync(path.join(path.dirname(this.stateFile), 'front-preferred.json'),
+            JSON.stringify({ host: fastest.host }));
+        } catch {}
+      }
+      return results;
+    }).finally(() => { this.probing = null; });
     return this.probing;
   }
 
@@ -314,7 +342,13 @@ class FrontManager {
   serveFrontsScript(res) {
     (async () => {
       if (!this.probesDone && this.probing) {
-        await Promise.race([this.probing.catch(() => {}), new Promise((r) => setTimeout(r, 4500))]);
+        // A single verified working front is enough to start Web K.
+        // Never wait for all other health checks on the critical startup path.
+        await Promise.race([
+          this.probing.catch(() => {}),
+          this.firstHealthy || Promise.resolve(),
+          new Promise((r) => setTimeout(r, 4500))
+        ]);
       }
       const { domains: ranked, source } = this.rankedList();
       const domains = ranked.filter((d) => {
@@ -431,6 +465,9 @@ class DohResolver {
   // Google/Cloudflare отвечают JSON на GET; AdGuard/Comss понимают только
   // RFC 8484 (wireformat POST) — на одном URL пробуем оба формата.
   async queryOne(u, host) {
+    // Known RFC 8484 endpoints do not support Google's JSON format.
+    // Avoid an unnecessary blocked GET before the actual DNS request.
+    if (DEFAULT_DOH.includes(u) && u.endsWith('/dns-query')) return this.queryWire(u, host);
     try {
       const sep = u.includes('?') ? '&' : '?';
       const res = await fetch(u + sep + 'name=' + encodeURIComponent(host) + '&type=A', {

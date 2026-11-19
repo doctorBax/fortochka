@@ -97,3 +97,50 @@ test('one failing probe does not abort all other front health checks', async () 
   assert.equal(result[0].alive, false);
   assert.equal(result[1].alive, true);
 });
+
+test('startup releases fronts as soon as the first healthy probe completes', async () => {
+  const fm = new FrontManager({ fronts: { autoUpdate: false, list: ['slow.example', 'fast.example'] } },
+    '/tmp/state.json');
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  fm.probeHost = async (host) => {
+    if (host.includes('slow.example')) { await slow; return { alive: false, ms: null }; }
+    return { alive: true, ms: 8 };
+  };
+  fm.start();
+  const body = await Promise.race([
+    new Promise((resolve) => fm.serveFrontsScript({
+      writeHead() {}, end(value) { resolve(value); }, destroy() { resolve(null); }
+    })),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('front list waited for slow probe')), 250))
+  ]);
+  assert.match(body, /fast\.example/);
+  releaseSlow();
+  await fm.probing;
+  fm.stop();
+});
+
+test('previously healthy front is probed first without altering result order', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fortochka-preferred-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'front-preferred.json'), JSON.stringify({ host: 'last.example' }));
+    const domains = Array.from({ length: 12 }, (_, i) => 'front' + i + '.example').concat('last.example');
+    const fm = new FrontManager({ fronts: { autoUpdate: false, list: domains } },
+      path.join(dir, 'state.json'));
+    const called = [];
+    fm.probeHost = async (host) => {
+      called.push(host);
+      return { alive: true, ms: 10 };
+    };
+    fm.start();
+    const result = await fm.probing;
+    assert.equal(called[0], 'kws2.last.example');
+    assert.deepEqual(result.map((r) => r.host), domains);
+    fm.stop();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
