@@ -75,3 +75,20 @@ test('malformed/truncated DNS packets are ignored, not cached as valid answers',
   assert.deepEqual(parseDnsA(payload), []);
   assert.deepEqual(parseDnsA(dnsResponse(name, '192.0.2.12').subarray(0, 20)), []);
 });
+
+test('known RFC8484 endpoints skip JSON probing and go directly to wireformat', async () => {
+  const original = global.fetch;
+  const resolver = new DohResolver({ doh: {
+    enabled: true, urls: ['https://unfiltered.adguard-dns.com/dns-query']
+  } });
+  const methods = [];
+  global.fetch = async (url, options) => {
+    methods.push(options.method || 'GET');
+    assert.equal(options.method, 'POST');
+    return { ok: true, arrayBuffer: async () => dnsResponse(name, '203.0.113.10') };
+  };
+  try {
+    assert.deepEqual(await resolver.lookup(name), ['203.0.113.10']);
+    assert.deepEqual(methods, ['POST']);
+  } finally { global.fetch = original; }
+});
